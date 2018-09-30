@@ -18,6 +18,7 @@ object Test {
   case class Times(x: Term, y: Term) extends Term
 
 
+  case object Unknown extends Type
   case object Unit extends Type
   case object Nat extends Type
   case object Bool extends Type
@@ -113,20 +114,36 @@ object Test {
   def fromScala1(t: Tree): Type = t match {
     case tq"Int" => Nat
     case tq"$a => $b" => Fun(fromScala1(a), 1, fromScala1(b)::Nil)
-    case _ if t.toString == "<type ?>" => Unit
+    case _ if t.toString == "Any" => Unknown
+    case _ if t.toString == "<type ?>" => Unknown
   }
 
 
   def pretty(t: Term): String = t match {
     case Const(x) => x.toString
     case Var(x) => x.toString
-    case App(f,x) => s"${pretty(f)}(${pretty(x)})"
-    case Lam(x,n,t,y) => s"{ $x: $t => ${pretty(y)}}"
-    case Exit(x) => s"exit(${pretty(x)})"
-    case Reset(x) => s"reset(${pretty(x)})"
-    case Shift(x) => s"shift(${pretty(x)})"
-    case Plus(x,y) => s"(${pretty(x)} + ${pretty(y)}"
-    case Times(x,y) => s"(${pretty(x)} * ${pretty(y)}"
+    case App(f,x) => s"${pretty(f)}(${prettyb(x)})"
+    case Lam(x,n,t,y) if t == Unknown => s"($x => ${prettyb(y)})"
+    case Lam(x,n,t,y) => s"($x: ${pretty(t)} => ${prettyb(y)})"
+    case Exit(x) => s"exit(${prettyb(x)})"
+    case Reset(x) => s"reset(${prettyb(x)})"
+    case Shift(x) => s"shift(${prettyb(x)})"
+    case Plus(x,y) => s"(${pretty(x)} + ${pretty(y)})"
+    case Times(x,y) => s"(${pretty(x)} * ${pretty(y)})"
+  }
+
+  def prettyb(t: Term): String = t match {
+    case Lam(x,n,t,y) if t == Unknown => s"$x => ${prettyb(y)}"
+    case Lam(x,n,t,y) => s"$x: ${pretty(t)} => ${prettyb(y)}"
+    case Plus(x,y) => s"${pretty(x)} + ${pretty(y)}"
+    case Times(x,y) => s"${pretty(x)} * ${pretty(y)}"
+    case _ => pretty(t)
+  }
+
+
+  def pretty(t: Type): String = t match {
+    case Unknown => "?"
+    case _ => t.toString
   }
 
 
@@ -153,37 +170,74 @@ object Test {
     case Reset(x) => 
       k(evalStd(x)(x => x)) // same level
 
+    case Exit(x) => evalStd(x) { u => u }
   }
 
+  var nNames = 0
+  def fresh(s: String) = try Ident(TermName(s+nNames)) finally nNames += 1
+
+  def transStd(t: Term)(k: Tree => Tree)(implicit env: Map[String,Tree]): Tree = t match {
+    case Const(x: Int) =>       k(Literal(Constant(x)))
+    case Const(x: Boolean) =>   k(Literal(Constant(x)))
+    case Plus(x,y) =>           transStd(x) { u => transStd(y) { v => k(q"$u + $v") }}
+    case Times(x,y) =>          transStd(x) { u => transStd(y) { v => k(q"$u * $v") }}
+    case Var(x) =>              k(q"${env(x)}")
+
+    case Lam(x,n,t,y) =>
+      val (x1,k1) = (fresh("x"),fresh("k"))
+      val k1f = (x: Tree) => q"$k1($x)" // eta
+      k(q"(($x1:Any) => ($k1:Any) => ${ transStd(y)(k1f)(env + (x -> x1)) })")
+
+    case App(x,y) =>
+      val z = fresh("z")
+      val ks = q"(($z:Any) => ${k(q"$z")})"
+      transStd(x) { u => transStd(y) { v => q"$u($v)($ks)" }}
+
+    case If(c,a,b) =>
+      transStd(c) { x => if (x.asInstanceOf[Boolean]) transStd(a)(k) else transStd(b)(k) }
+  
+    case Shift(Lam(x,n,t,y)) =>
+      val k1 = fresh("k")
+      val (zz,kk) = (fresh("zz"),fresh("kk"))
+      val ks = q"(($zz:Any) => ($kk:Any) => $kk(${k(q"$zz")}))" // eta, delimited (caller expects to pass cont)
+      q"(($k1:Any) => ${ transStd(y)(x => x)(env + (x -> k1)) })($ks)"
+
+
+    case Shift(x) => //shift((k: T => U) => U): T @cps[U]
+      transStd(x) { f => 
+        val x = fresh("x")
+        val (zz,kk) = (fresh("zz"),fresh("kk"))
+        q"$f(($zz:Any) => ($kk:Any) => $kk(${k(q"$zz")}))($x => $x)"
+      }
+
+    case Reset(x) => 
+      k(transStd(x)(x => x)) // same level
+
+  }
 
 
   case class AbortException(x: Any) extends Exception
 
-  def eval0(t: Term)(implicit env: Map[String,Any]): Nothing = t match {
+  def eval0[A](t: Term)(implicit env: Map[String,Any]): A = t match {
     case Exit(x) =>
-      evalN[Nothing](x)(C0,env) { x => throw AbortException(x) }
+      evalN[A](x)(C0(),env) { x => throw AbortException(x) }
     // case If(c,a,b) =>
     //   if (eval1(c).asInstanceOf[Boolean]) eval0(a) else eval0(b)
     // case Let(x, n, y, z) => 
     //   val v = eval1(y)
     //   eval0(z)(env + (x -> v))
     case App(f, x) => 
-      evalN[Nothing](f)(C0,env) { fv =>
-      evalN[Nothing](x)(C0,env) { fx =>
-      fv.asInstanceOf[Any=>Nothing](fx) }}
+      evalN[A](f)(C0(),env) { fv =>
+      evalN[A](x)(C0(),env) { fx =>
+      fv.asInstanceOf[Any=>A](fx) }}
   }
 
 
   type Wrap[A] = (Any => A) => A
 
-  abstract class CPS[A] {
-  }
-
-  case object C0 extends CPS[Nothing] {
-  }
-
-  case class CN[A](next: CPS[A]) extends CPS[Wrap[A]] {
-  }
+  abstract class CPS[A]
+  case class C0[A]() extends CPS[A]
+  case class CN[A](next: CPS[A]) extends CPS[Wrap[A]]
 
 
   def evalN[A](t: Term)(cps: CPS[A], env: Map[String,Any])(k: Any => A): A = t match {
@@ -205,13 +259,92 @@ object Test {
     case Shift(Lam(x,n,t,y)) => //shift((k: T => U) => U): T @cps[U]
 
       val f: Wrap[A] = cps match {
-        case C0 => (x1:Any => Nothing) => eval0(y)(env + (x -> x1))
+        case _:C0[a]  => (x1:Any => a) => eval0(y)(env + (x -> x1))
         case CN(next:CPS[b]) => (x1:Any => b) => evalN(y)(next,env + (x -> x1)) _ // one level lower
       }
       f(k)
 
     case Reset(x) => 
       evalN(x)(CN(cps),env)(x => k => k(x))(k) // one higher level
+  }
+
+
+
+  def trans0(t: Term)(implicit env: Map[String,Tree]): Tree = t match {
+    case Exit(x) =>
+      transN[Tree](x)(C0(),env) { x => q"exit($x)" }
+    // case If(c,a,b) =>
+    //   if (eval1(c).asInstanceOf[Boolean]) eval0(a) else eval0(b)
+    // case Let(x, n, y, z) => 
+    //   val v = eval1(y)
+    //   eval0(z)(env + (x -> v))
+    case App(f, x) => 
+      transN[Tree](f)(C0(),env) { fv =>
+      transN[Tree](x)(C0(),env) { fx =>
+      q"$fv($fx)" }}
+  }
+
+  case class Eta(f: Tree) extends (Tree => Tree) {
+    def apply(x: Tree) = q"$f($x)"
+  }
+
+  def eta(f: Tree => Tree): Tree = f match {
+    case Eta(f) => f
+    case _ =>
+      val z = fresh("z")
+      q"(($z:Any) => ${f(q"$z")})"
+  }
+
+  def transN[A](t: Term)(cps: CPS[A], env: Map[String,Tree])(k: Tree => Tree): Tree = t match {
+    case Const(x: Int) =>       k(Literal(Constant(x)))
+    case Const(x: Boolean) =>   k(Literal(Constant(x)))
+    case Plus(x,y) =>           transN(x)(cps,env) { u => transN(y)(cps,env) { v => k(q"$u + $v") }}
+    case Times(x,y) =>          transN(x)(cps,env) { u => transN(y)(cps,env) { v => k(q"$u * $v") }}
+    case Var(x) =>              k(q"${env(x)}")
+
+    case Lam(x,n,t,y) =>        
+      val (x1,k1) = (fresh("x"),fresh("k"))
+      k(q"(($x1:Any) => ($k1:Any) => ${ transN(y)(cps,env + (x -> x1))(Eta(k1)) })")
+      // as many continuations as necessary??
+
+    case App(x,y) =>            
+      val ks = eta(k)
+      transN(x)(cps,env) { u => transN(y)(cps,env) { v => q"$u($v)($ks)" }}
+
+    case If(c,a,b) =>
+      transN(c)(cps,env) { x => if (x.asInstanceOf[Boolean]) transN(a)(cps,env)(k) else transN(b)(cps,env)(k) }
+  
+    case Shift(Lam(x,n,t,y)) => //shift((k: T => U) => U): T @cps[U]
+
+      cps match {  // one level lower
+        case _:C0[a] =>
+
+          val k1 = fresh("k")
+
+          val ks = eta(k) // eta, delimited (caller *does not* expect to pass cont)
+
+          val body = q"(($k1:Any) => ${ trans0(y)(env + (x -> k1)) })"
+
+          q"$body($ks)"
+
+       case CN(next:CPS[b]) => 
+
+          val k1 = fresh("k")
+          val kk = fresh("kk")
+
+          val ks = eta(k) // eta, delimited (caller expects to pass cont, could eta one more!)
+
+          val body = q"(($k1:Any) => ($kk:Any) => ${ transN(y)(next,env + (x -> k1))(Eta(kk)) })"
+
+          q"$body($ks)"
+      }
+
+
+    case Reset(x) => 
+      val k1 = fresh("k")
+      val ks = eta(k)
+
+      q"${ (transN(x)(CN(cps),env)(x => q"(($k1: Any) => $k1($x))")) } ($ks)" // one level higher
   }
 
 
@@ -251,6 +384,19 @@ object Test {
       assert(x == y)
     }
 
+    def genStd(t: Tree, x: Any) = {
+      nNames = 0
+      val p = fromScala(t)
+      println(pretty(p))
+      val ys = transStd(p) { x => x} (Map())
+      //println(y)
+      val y = fromScala(ys)
+      println(pretty(y))
+      val z = evalStd(y) { x => x}
+      println(z)
+      assert(x == z)
+    }
+
     def runMod(t: Tree, x: Any) = {
       val p = fromScala(t)
       println(pretty(p))
@@ -262,6 +408,21 @@ object Test {
       assert(x == y)
     }
 
+    def genMod(t: Tree, x: Any) = {
+      nNames = 0
+      val p = fromScala(t)
+      println(pretty(p))
+      val ys = try trans0(p)(Map())//evalMod(p,0)(C0)
+      val y = fromScala(ys)
+      println(pretty(y))
+      val z = evalStd(y) { x => x}
+      println(z)
+      assert(x == z)
+    }
+
+
+    println("--- std ---")
+
     runStd(q"reset(shift(k => 1))", 1)
     runStd(q"reset(shift(k => k(1)))", 1)
     runStd(q"reset(shift(k => k(k(1))))", 1)
@@ -272,18 +433,80 @@ object Test {
     runStd(q"reset(2 * shift(k => k(k(1))))", 4)
     runStd(q"reset(2 * shift(k => k(k(k(1)))))", 8)
 
+    println("--- std gen ---")
+
+    // reset(shift({ k: ? => 1}))
+    // (x1 => k1 => k1(1))(x => k1 => k1(x))(x => x)
+    // (k1 => k1(1))(x => x)
+    // (x => x)(1)
+    // 1
+
+    // reset(shift({ k: ? => k(1)}))
+    // (x1 => k1 => x1(1)((z => k1(z))))(x => k1 => k1(x))(x => x)
+    // (k1 => (x => k2 => k2(x))(1)((z => k1(z))))(x => x)
+    // (k1 => (k2 => k2(1))((z => k1(z))))(x => x)
+    // (k1 => k1(1))(x => x)
+    // (x => x)(1)
+    // 1
+
+    // reset((2 * shift({ k: ? => k(1)}))
+    // (x1 => k1 => x1(1)((z => k1(z)))) (x => k1 => k1(2 * x)) (x => x)
+    // (k1 => (x => k2 => k2(2 * x))(1) ((z => k1(z)))) (x => x)
+    // (k1 => (k2 => k2(2 * 1)) ((z => k1(z)))) (x => x)
+    // (k1 => ((z => k1(z)))(2 * 1)) (x => x)
+    // (k1 => ((k1((2 * 1))))) (x => x)
+    // ((((x => x)((2 * 1))))) 
+    // ((((x => x)((2 * 1))))) 
+    // 2*1
+
+    genStd(q"(x => x)(1)", 1)
+    genStd(q"reset(2)", 2)
+    genStd(q"reset(shift(k => k(2)))", 2)
+
+
+    genStd(q"reset(shift(k => 1))", 1)
+    genStd(q"reset(shift(k => k(1)))", 1)
+    genStd(q"reset(shift(k => k(k(1))))", 1)
+    genStd(q"reset(shift(k => k(k(k(1)))))", 1)
+
+    genStd(q"reset(2 * shift(k => 1))", 1)
+    genStd(q"reset(2 * shift(k => k(1)))", 2)
+    genStd(q"reset(2 * shift(k => k(k(1))))", 4)
+    genStd(q"reset(2 * shift(k => k(k(k(1)))))", 8)
+
+    println("--- mod ---")
+
     runMod(q"exit(reset(2 * shift(k => 1)))", 1)
     runMod(q"exit(reset(2 * shift(k => k(1))))", 2)
     runMod(q"exit(reset(2 * shift(k => k(k(1)))))", 4)
-    runMod(q"exit(reset(2 * shift((k: Int => Int) => k(k(k(1))))))", 8)
+    runMod(q"exit(reset(2 * shift(k => k(k(k(1))))))", 8)
 
     runMod(q"exit(1 + shift(k => exit(5)))", 5)
     runMod(q"exit(1 + shift(k => k(1)))", 2)
 
     runMod(q"exit(reset(1 + reset(2 * shift(k1 => shift(k0 => k0(k1(1)))))))", 3)
 
+    println("--- mod gen ---")
+
+    genMod(q"exit((x => x)(1))", 1)
+    genMod(q"exit(reset(2))", 2)
+    genMod(q"exit(reset(shift(k => k(2))))", 2)
+
+    genMod(q"exit(reset(2 * shift(k => 1)))", 1)
+    genMod(q"exit(reset(2 * shift(k => k(1))))", 2)
+    genMod(q"exit(reset(2 * shift(k => k(k(1)))))", 4)
+    genMod(q"exit(reset(2 * shift(k => k(k(k(1))))))", 8)
+
+    genMod(q"exit(1 + shift(k => exit(5)))", 5)
+    genMod(q"exit(1 + shift(k => k(1)))", 2)
+
+    genMod(q"exit(reset(1 + reset(2 * shift(k1 => shift(k0 => k0(k1(1)))))))", 3)
 
 
+
+    // TODO:
+    // + codegen
+    // - typing
 
     println("DONE")
   }
