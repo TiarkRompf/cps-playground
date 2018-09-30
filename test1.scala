@@ -502,10 +502,16 @@ object Test {
 
     genMod(q"exit(reset(1 + reset(2 * shift(k1 => shift(k0 => k0(k1(1)))))))", 3)
 
+    // example: shift inside a lambda
+    genMod(q"exit(reset(1 + reset(2 * (x => shift(k1 => shift(k0 => k0(k1(x)))))(1))))", 3)
+
+
+
 
 
     // TODO:
     // + codegen
+    // - tupled instead of curried args
     // - typing
 
     println("DONE")
