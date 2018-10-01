@@ -594,11 +594,93 @@ object Test {
   }
 
 
+  def transFullEta(t: Term)(env: Map[String,Term]): Term = t match {
+    case Const(x: Int) =>       ifun(k => app(k, (Const(x))))
+    case Const(x: Boolean) =>   ifun(k => app(k, (Const(x))))
+    case Plus(x,y) =>           ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(k, Plus(u,v)) })}))
+    case Times(x,y) =>          ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(k, Times(u,v)) })}))
+    case Var(x) =>              ifun(k => app(k, (env(x))))
+
+    case Exit(x) =>             app(transFullEta(x)(env), ifun(x => Exit(x)))
+
+    case Lam(x,n,tp,y) =>
+      val Fun(t1,_,ts2)::rest = t.tpe
+      if (ts2.length > 0) {
+        def eta(n: Int, x: Term): Term = 
+          if (n > 0) fun(k => app(eta(n-1,x),k)) else x
+        ifun(k => app(k, fun(x1 => eta(ts2.length, transFullEta(y)(env + (x -> x1))))))
+      }
+      else 
+        ifun(k => app(k, fun(x1 => transFullEta(y)(env + (x -> x1))))) // do not cps transform!
+      // as many continuations as necessary?? 
+
+    case App(x,y) =>
+      t.tpe.length match {
+        case 0 =>
+          app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(u,v) })})
+        case 1 =>
+          ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(app(u,v),k) })}))
+        case 2 =>
+          // ifun(k1 => ifun(k2 => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(app(app(u,v),k1),k2) })})))
+
+          assert(x.tpe.length == 1)
+          assert(y.tpe.length == 2)
+
+          ifun(k1 => ifun(k2 => 
+            app(transFullEta(x)(env), ifun { u => 
+              app(app(transFullEta(y)(env), ifun { v => ifun { vk => app(app(app(u,v),k1),vk) }}), k2)}
+            )))
+
+        case 3 =>
+          assert(x.tpe.length == 1)
+          assert(y.tpe.length == 1)
+          ifun(k1 => ifun(k2 => ifun(k3 => 
+            app(transFullEta(x)(env), ifun { u => 
+              app(transFullEta(y)(env), ifun { v => 
+                app(app(app(app(u,v),k1),k2),k3) })}))))
+      }
+
+    // case If(c,a,b) =>
+    //   transN(c)(cps,env) { x => if (x.asInstanceOf[Boolean]) transN(a)(cps,env)(k) else transN(b)(cps,env)(k) }
+  
+    // case Up(x) => 
+    //   transN(x)(cps,env)(k) // XXX no-op here -- wasn't needed
+
+    case Shift(f) => //shift((k: T => U) => U): T @cps[U]
+      t.tpe.length match {
+        case 1 =>
+          ifun(k => 
+            app(transFullEta(f)(env), ifun { f1 => // multiple continuations, turn them into one passes to f
+              app(f1, k)
+          }))
+        case 2 =>
+          ifun(k1 => ifun(k2 => 
+            app(transFullEta(f)(env), ifun { f1 => // multiple continuations, turn them into one passes to f
+              app(app(f1,k1),k2)
+          })))
+        case 3 =>
+          ifun(k1 => ifun(k2 => ifun(k3 => 
+            app(transFullEta(f)(env), ifun { f1 => // multiple continuations, turn them into one passes to f
+              app(app(app(f1,k1),k2),k3)
+          }))))
+      }  
+
+    case Reset(x) => 
+      t.tpe.length match {
+        case 1 =>
+          val id1 = ifun(x => ifun(k => app(k,x)))
+          ifun(k => app(app(transFullEta(x)(env), id1), k))
+        case 2 =>
+          val id2 = ifun(x => ifun(k1 => ifun(k2 => app(app(k1,x),k2))))
+          ifun(k1 => ifun(k2 => app(app(app(transFullEta(x)(env), id2), k1), k2)))
+      }
+      // one level higher: result expects to be called with k!
       // fun(k => app(..., k))
   }
 
 
 
+//(z0 => z1 => (z2 => z3 => (z4 => z5 => z4(z0)(z5))(z6 => z2(z6)(z3)))(z1))(1)(z7 => z8 => z8(2 * z7))(z9 => z10 => z10(1 + z9))(z11 => exit(z11))
 
 
 
@@ -693,6 +775,12 @@ object Test {
       val z = evalStd(y) { x => x}
       println(" "+z)
       assert(x == z)}
+
+      {nNames = 0
+      val y = transFullEta(p1)(Map())
+      println(" "+pretty(y))
+      val z = evalStd(y) { x => x}
+      println(" "+z)
       assert(x == z)}
     }
 
