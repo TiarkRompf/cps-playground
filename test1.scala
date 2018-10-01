@@ -18,6 +18,8 @@ object Test {
   case class Up(x: Term) extends Term
   case class Exit(x: Term) extends Term
 
+  case class ILam(f: Term => Term) extends Term
+  case class Tuple(x: Term, y: Term) extends Term
 
   case object Unknown extends Type
   case object Unit extends Type
@@ -155,6 +157,7 @@ object Test {
             s"    expected:   "+ty.map(pretty).mkString(" / ")
           )
           val y1 = typeCheck(y, ts2)(env + (x -> List(t1)))
+          // TODO: insert up if not enough types?
           Lam(x, n, t1, y1) withType List(Fun(t1, n, y1.tpe))
         //case _ => // error
       }
@@ -168,9 +171,12 @@ object Test {
 
     case Reset(x) => 
       val x1 = typeCheck(x, ty.head::ty)
-      //assert(x1.tpe.length < 2 || x1.tpe.head == x1.tpe.tail.head)
-      Reset(x1) withType x1.tpe.tail
-
+      assert(x1.tpe.length < 2 || x1.tpe.head == x1.tpe.tail.head)
+      // TODO: insert up if not enough types?
+      if (x1.tpe.length < 2)
+        Reset(x1) withType x1.tpe
+      else
+        Reset(x1) withType x1.tpe.tail
   }
 
   def typeCheck(t: Term, ty: EType)(implicit env: Map[String,EType]): Term = {
@@ -263,6 +269,7 @@ object Test {
     case Exit(x) => s"exit(${prettyb(x)})"
     case Reset(x) => s"reset(${prettyb(x)})"
     case Shift(x) => s"shift(${prettyb(x)})"
+    case ILam(f) => s"(.. => ..)"
   }
 
   def prettyb(t: Term): String = t match {
@@ -513,64 +520,59 @@ object Test {
       q"${ (transN(x)(CN(cps),env)(x => q"(($k1: Any) => $k1($x))")) } ($ks)" // one level higher
   }
 
-// alt signature: 
-//    k: List[Tree]           continuation symbols
-//    k: List[Tree => Tree]   continuation contexts
-//
-// def transN2(t: Term)(env: Map[String,Tree]): Tree = t match {
-//     case Const(x: Int) =>
-//       if (n == 0) {
-//         Literal(Constant(x))
-//       } else if (n == 1) {
-//         val c = Literal(Constant(x))
-//         q"(k:Nat => Void) => k($c)"
-//       } else if (n == 2) {
-//         val c = Literal(Constant(x))
-//         q"(k1:Nat => (Nat => Void) => Void) => (k2:Nat => Void) => k1($c)(k2)"
-//         //q"(k1:Nat => (Nat => Void) => Void) => (k2:Nat => Void) => k1($c)(k2)"
-//         //q"(k1:Nat => (Nat => Void) => Void) => k1($c)"
-//         // but
-//         //q"(k1:Nat x (Nat => Void) => Void), (k2:Nat => Void) => k1($c,k2)"
-//       }
 
-//       // (Nat => Void)
-//       // Nat => (Nat => Void)
-//       def consume(ks: List[Tree]): Tree => Tree = k match {
-//         case k::ks =>
-//           (x => k(x,ks))
+  def freshv(s: String) = try Var(s+nNames) finally nNames += 1
 
-//         case Nil => (x => x)
-//       }
-
-//       k(Literal(Constant(x)))
-
-// }
-
-  def app(x: Tree, y: Tree) = q"$x($y)" //x match { case Eta(f) => f(y) case _ => q"$x($y)" }
-  def fun(x: Tree => Tree) = eta(x)
-
-  def transTrivial0(t: Term)(implicit env: Map[String,Tree]): Tree = t match {
-    case Exit(x) =>             app(transTrivial(x)(env), fun(x => q"exit($x)"))
-    case App(f, x) => 
-      app(transTrivial(f)(env), fun { u => app(transTrivial(x)(env), fun { v => app(u,v) })})
+  def app(x: Term, y: Term) = x match {
+    case ILam(f) => f(y)
+    case _ => App(x,proper(y))
   }
-  def transTrivial(t: Term)(env: Map[String,Tree]): Tree = t match {
-    case Const(x: Int) =>       fun(k => app(k, (Literal(Constant(x)))))
-    case Const(x: Boolean) =>   fun(k => app(k, (Literal(Constant(x)))))
-    case Plus(x,y) =>           fun(k => app(transTrivial(x)(env), fun { u => app(transTrivial(y)(env), fun { v => app(k, q"$u + $v") })}))
-    case Times(x,y) =>          fun(k => app(transTrivial(x)(env), fun { u => app(transTrivial(y)(env), fun { v => app(k, q"$u * $v") })}))
-    case Var(x) =>              fun(k => app(k, (env(x))))
+
+  def ifun(f: Term => Term) = ILam(f)
+
+  def fun(f: Term => Term): Term = {
+      val z = freshv("z")
+      Lam(z.x,1,Unknown,proper(f(z)))
+  }
+
+  def proper(f: Term): Term = f match {
+    case ILam(f) => fun(f)
+    case _ => f
+  }
+
+  def fun(f: (Term, Term) => Term): Term = {
+      fun(x => fun(y => f(x,y)))
+  }
+
+  def app(f: Term, x: Term, y: Term): Term = {
+      app(app(f,x),y)
+  }
+
+  // note: without eta in Lam case, result is identical to transN above
+  def transTrivial(t: Term)(env: Map[String,Term]): Term = t match {
+    case Const(x: Int) =>       ifun(k => app(k, (Const(x))))
+    case Const(x: Boolean) =>   ifun(k => app(k, (Const(x))))
+    case Plus(x,y) =>           ifun(k => app(transTrivial(x)(env), ifun { u => app(transTrivial(y)(env), ifun { v => app(k, Plus(u,v)) })}))
+    case Times(x,y) =>          ifun(k => app(transTrivial(x)(env), ifun { u => app(transTrivial(y)(env), ifun { v => app(k, Times(u,v)) })}))
+    case Var(x) =>              ifun(k => app(k, (env(x))))
+
+    case Exit(x) =>             app(transTrivial(x)(env), ifun(x => Exit(x)))
 
     case Lam(x,n,tp,y) =>
       val Fun(t1,_,ts2)::rest = t.tpe
-      if (ts2.length > 0)
-        fun(k => app(k, fun(x1 => transTrivial(y)(env + (x -> x1)) )))
+      if (ts2.length > 0) {
+        def eta(n: Int, x: Term): Term = x // optional!!
+          //if (n > 0) fun(k => app(eta(n-1,x),k)) else x
+        ifun(k => app(k, fun(x1 => eta(ts2.length, transTrivial(y)(env + (x -> x1))))))
+      }
       else 
-        fun(k => app(k, fun(x1 => transTrivial0(y)(env + (x -> x1))))) // do not cps transform!
-      // as many continuations as necessary??
+        ifun(k => app(k, fun(x1 => transTrivial(y)(env + (x -> x1))))) // do not cps transform!
 
-    case App(x,y) =>            
-      fun(k => app(transTrivial(x)(env), fun { u => app(transTrivial(y)(env), fun { v => app(app(u,v),k) })}))
+    case App(x,y) =>
+      if (t.tpe.length == 0)
+        app(transTrivial(x)(env), ifun { u => app(transTrivial(y)(env), ifun { v => app(u,v) })})
+      else
+        ifun(k => app(transTrivial(x)(env), ifun { u => app(transTrivial(y)(env), ifun { v => app(app(u,v),k) })}))
 
     // case If(c,a,b) =>
     //   transN(c)(cps,env) { x => if (x.asInstanceOf[Boolean]) transN(a)(cps,env)(k) else transN(b)(cps,env)(k) }
@@ -579,12 +581,19 @@ object Test {
     //   transN(x)(cps,env)(k) // XXX no-op here -- wasn't needed
 
     case Shift(f) => //shift((k: T => U) => U): T @cps[U]
-      fun(k => app(transTrivial(f)(env), fun { f1 =>
-        app(f1,k)
+      ifun(k => 
+        app(transTrivial(f)(env), ifun { f1 => // multiple continuations, turn them into one passes to f
+          app(f1, k)
       }))
 
     case Reset(x) => 
-      app(transTrivial(x)(env), fun(x => fun(k => app(k,x)))) // one level higher: result expects to be called with k!
+      val id1 = ifun(x => ifun(k => app(k,x)))
+      app(transTrivial(x)(env), id1)
+      // one level higher: result expects to be called with k!
+      // fun(k => app(..., k))
+  }
+
+
       // fun(k => app(..., k))
   }
 
@@ -670,18 +679,20 @@ object Test {
       val p1 = typeCheck(p,Nil)
       println(pretty(p1))
 
-      {val ys = trans0(p1)(Map())
+      {nNames = 0
+      val ys = trans0(p1)(Map())
       val y = fromScala(ys)
-      println(pretty(y))
+      println(" "+pretty(y))
       val z = evalStd(y) { x => x}
-      println(z)
+      println(" "+z)
       assert(x == z)}
 
-      {val ys = transTrivial0(p1)(Map())
-      val y = fromScala(ys)
-      println(pretty(y))
+      {nNames = 0
+      val y = transTrivial(p1)(Map())
+      println(" "+pretty(y))
       val z = evalStd(y) { x => x}
-      println(z)
+      println(" "+z)
+      assert(x == z)}
       assert(x == z)}
     }
 
