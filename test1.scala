@@ -2,7 +2,7 @@ package test1
 
 object Test {
 
-  abstract class Term
+  abstract class Term { var tpe: EType = _ }
   abstract class Type
 
   case class Const(x: Any) extends Term
@@ -10,12 +10,13 @@ object Test {
   case class Lam(x: String, n: Int, t: Type, y: Term) extends Term
   case class App(f: Term, x: Term) extends Term
   case class Let(x: String, n: Int, y: Term, z: Term) extends Term
-  case class Reset(x: Term) extends Term
-  case class Shift(x: Term) extends Term
   case class If(c: Term, a: Term, b: Term) extends Term
-  case class Exit(x: Term) extends Term
   case class Plus(x: Term, y: Term) extends Term
   case class Times(x: Term, y: Term) extends Term
+  case class Reset(x: Term) extends Term
+  case class Shift(x: Term) extends Term
+  case class Up(x: Term) extends Term
+  case class Exit(x: Term) extends Term
 
 
   case object Unknown extends Type
@@ -38,7 +39,15 @@ object Test {
     case (a1::as, b1::bs) if as == bs => (b1::bs) // generalize?
   }
 
-  def typeInfer(t: Term)(implicit env: Map[String,EType]): List[Type] = t match {
+  implicit class foo(t: Term) {
+    def withType(ty: EType) = try t finally t.tpe = ty
+  }
+
+  def typeInfer(t: Term)(implicit env: Map[String,EType]): Term = {
+    t withType typeInfer1(t)
+  }
+
+  def typeInfer1(t: Term)(implicit env: Map[String,EType]): EType = t match {
     case Const(x: Int) =>       List(Nat)
     case Const(x: Boolean) =>   List(Bool)
     case Var(x) =>              env(x)
@@ -47,43 +56,165 @@ object Test {
       Void
     case If(c,a,b) =>
       val e1 = typeCheckPrefix(c, List(Bool)) // may effect
-      val ty = typeInfer(a)
+      val ty = typeInfer(a).tpe
       typeCheck(b, ty)
       seq(e1,ty)
     case Let(x, n, y, z) => 
-      val ty = typeInfer(y)
-      val ty1 = typeInfer(z)(env + (x -> List(ty.head)))
+      val ty = typeInfer(y).tpe
+      val ty1 = typeInfer(z)(env + (x -> List(ty.head))).tpe
       seq(ty,ty1)
     case Lam(x, n, t, y) => 
-      val ty = typeInfer(y)(env + (x -> List(t)))
+      val ty = typeInfer(y)(env + (x -> List(t))).tpe
       List(Fun(t, n, ty))
     case App(f, x) => 
-      val tf @ (Fun(thx,n,ty)::_) = typeInfer(f)
+      val tf @ (Fun(thx,n,ty)::_) = typeInfer(f).tpe
       val tx = typeCheckPrefix(x, List(thx))
       seq(seq(tf,tx),ty)
 
     case Reset(x) => //reset(T @cps[T]): T
-      val thd::ttl = typeInfer(x)
+      val thd::ttl = typeInfer(x).tpe
       assert(thd == ttl.head)
       ttl
 
     case Shift(x) => //shift((k: T => U) => U): T @cps[U]
-      val tf @ (Fun(Fun(tx,n1,tu1),n2,tu2)::Nil) = typeInfer(x)
+      val tf @ (Fun(Fun(tx,n1,tu1),n2,tu2)::Nil) = typeInfer(x).tpe
       assert(tu1 == tu2)
       tx::tu1
   }
 
   def typeCheckPrefix(t: Term, ty: EType)(implicit env: Map[String,EType]): EType = (t,ty) match {
     case (_,_) =>
-      val ty1 = typeInfer(t)
+      val ty1 = typeInfer(t).tpe
       assert(ty1 startsWith ty)
       ty1
   }
 
-  def typeCheck(t: Term, ty: EType)(implicit env: Map[String,EType]) = (t,ty) match {
+  def typeCheckA(t: Term, ty: EType)(implicit env: Map[String,EType]): Term = (t,ty) match {
     case (_,_) =>
-      assert(typeInfer(t) == ty)
+      assert(typeInfer(t).tpe == ty)
+      t
   }
+
+  def comb(t1: EType, t2: EType): EType = (t1,t2) match {
+    case (_,Nil) => t1
+    case (Nil,_) => t2
+    case (a1::as1,b1::bs1) if a1 == b1 => a1::comb(as1,bs1)
+    case _ => assert(false, "incompatible context types " + t1.map(pretty).mkString(" / ") + 
+      " and " + t2.map(pretty).mkString(" / "))
+      ???
+  }
+
+  // The assigned type needs to combine effect information from all subexpressions.
+  // It's OK if 
+  def typeCheck1(t: Term, ty: EType)(implicit env: Map[String,EType]): Term = t match {
+    case Const(x: Int) =>       t withType List(Nat)
+    case Const(x: Boolean) =>   t withType List(Bool)
+    case Var(x) =>              t withType env(x)
+
+    case Up(x) =>
+      val x1 = typeCheck(x, ty.init)
+      Up(x1) withType (x1.tpe :+ ty.last)
+
+    case Exit(x) =>
+      val x1 = typeCheck(x, List(Nat))
+      Exit(x1) withType Void
+
+    case Plus(a, b) =>
+      // need to deal with 2 * shift() and shift() * 2
+      val a1 = typeCheck(a, Nat::ty.tail) // 
+      val b1 = typeCheck(b, Nat::ty.tail)
+      Plus(a1, b1) withType Nat::comb(a1.tpe.tail, b1.tpe.tail)
+
+    case Times(a, b) =>
+      // need to deal with 2 * shift() and shift() * 2
+      val a1 = typeCheck(a, Nat::ty.tail) // 
+      val b1 = typeCheck(b, Nat::ty.tail)
+      Times(a1, b1) withType Nat::comb(a1.tpe.tail, b1.tpe.tail)
+
+    case App(f, x) => 
+      if (ty == Nil) {
+        // TODO: check this
+        val f1 = typeCheck(f, Fun(Unknown,1,ty)::Nil)
+        val Fun(ty1,n,ty2)::Nil = f1.tpe
+        val x1 = typeCheck(x, ty1::Nil)
+        App(f1,x1) withType ty2
+      } else {
+        val f1 = typeCheck(f, Fun(Unknown,1,ty)::ty.tail)
+        val Fun(ty1,n,ty2)::_ = f1.tpe
+        val x1 = typeCheck(x, ty1::ty.tail)
+        App(f1,x1) withType comb(comb(f1.tpe.tail, x1.tpe.tail), ty2)
+      }
+
+    case Lam(x, n, t0, y) => 
+      ty match {
+        case Fun(te, n, ts2)::_ =>
+          val t1 = if (t0 == Unknown) te else t0
+          assert(t1 != Unknown,
+            s"missing parameter type!\n" +
+            s"    expression: "+pretty(t) + "\n" +
+            s"    expected:   "+ty.map(pretty).mkString(" / ")
+          )
+          val y1 = typeCheck(y, ts2)(env + (x -> List(t1)))
+          Lam(x, n, t1, y1) withType List(Fun(t1, n, y1.tpe))
+        //case _ => // error
+      }
+
+    case Shift(f) => //shift((k: T => U) => U): T @cps[U]
+      val t1::ts1 = ty
+      val f1 = typeCheck(f, Fun(Fun(t1,1,ts1),1,ts1)::ts1)
+      val Fun(Fun(t2,1,ts2),1,ts3)::_ = f1.tpe
+      assert(typeConformsE(ts2,ts3))
+      Shift(f1) withType (t2::ts2)
+
+    case Reset(x) => 
+      val x1 = typeCheck(x, ty.head::ty)
+      //assert(x1.tpe.length < 2 || x1.tpe.head == x1.tpe.tail.head)
+      Reset(x1) withType x1.tpe.tail
+
+  }
+
+  def typeCheck(t: Term, ty: EType)(implicit env: Map[String,EType]): Term = {
+    if (t.tpe ne null) return t
+
+    var t1 = typeCheck1(t,ty)
+    //while (t1.tpe.length < ty.length) // context polymorphism -- try to adapt
+      //t1 = typeCheck1(Up(t1),ty)
+
+    def assert(b: Boolean, s: String) = if (!b) println(s)
+
+    assert(typeConformsEpartial(t1.tpe, ty), 
+      s"type error!\n" +
+      s"    expression: "+pretty(t) + "\n" +
+      s"    expected:   "+ty.map(pretty).mkString(" / ") + "\n" +
+      s"    actual:     "+t1.tpe.map(pretty).mkString(" / ")
+    )
+    t1
+  }
+
+  // check against Unknown
+  // check that type includes no Unknown
+
+  def typeConformsE(t1: EType, t2: EType): Boolean = 
+    t1.length == t2.length && ((t1 zip t2) forall (typeConforms _).tupled)
+
+  def typeConformsEpartial(t1: EType, t2: EType): Boolean = 
+    t1.length <= t2.length && ((t1 zip t2) forall (typeConforms _).tupled)
+
+  // this is to deal with unknowns -- we're not doing subtyping
+  def typeConforms(t1: Type, t2: Type): Boolean = (t1,t2) match {
+    case (Nat, Nat) => true
+    case (Bool, Bool) => true
+    case (Nat, Unknown) => true
+    case (Bool, Unknown) => true
+    case (Fun(t1,n,t2), Unknown) => typeConforms(t1, Unknown) && typeConformsE(t2, t2.map(_ => Unknown))
+    case (Fun(t1,n1,t2), Fun(t3,n2,t4)) => n1 == n2 && typeConforms(t1, t3) && typeConformsE(t2, t4)
+    case _ => false
+  }
+
+
+
+
+
 
 /*
 
@@ -113,6 +244,7 @@ object Test {
 
   def fromScala1(t: Tree): Type = t match {
     case tq"Int" => Nat
+    case tq"Nat" => Nat
     case tq"$a => $b" => Fun(fromScala1(a), 1, fromScala1(b)::Nil)
     case _ if t.toString == "Any" => Unknown
     case _ if t.toString == "<type ?>" => Unknown
@@ -124,26 +256,35 @@ object Test {
     case Var(x) => x.toString
     case App(f,x) => s"${pretty(f)}(${prettyb(x)})"
     case Lam(x,n,t,y) if t == Unknown => s"($x => ${prettyb(y)})"
-    case Lam(x,n,t,y) => s"($x: ${pretty(t)} => ${prettyb(y)})"
+    case Lam(x,n,t,y) => s"($x: ${prettyb(t)} => ${prettyb(y)})"
+    case Plus(x,y) => s"(${pretty(x)} + ${pretty(y)})"
+    case Times(x,y) => s"(${pretty(x)} * ${pretty(y)})"
+    case Up(x) => s"up(${prettyb(x)})"
     case Exit(x) => s"exit(${prettyb(x)})"
     case Reset(x) => s"reset(${prettyb(x)})"
     case Shift(x) => s"shift(${prettyb(x)})"
-    case Plus(x,y) => s"(${pretty(x)} + ${pretty(y)})"
-    case Times(x,y) => s"(${pretty(x)} * ${pretty(y)})"
   }
 
   def prettyb(t: Term): String = t match {
     case Lam(x,n,t,y) if t == Unknown => s"$x => ${prettyb(y)}"
-    case Lam(x,n,t,y) => s"$x: ${pretty(t)} => ${prettyb(y)}"
+    case Lam(x,n,t,y) => s"$x: ${prettyb(t)} => ${prettyb(y)}"
     case Plus(x,y) => s"${pretty(x)} + ${pretty(y)}"
     case Times(x,y) => s"${pretty(x)} * ${pretty(y)}"
     case _ => pretty(t)
   }
 
 
+  def pretty(t: EType): String = t map pretty mkString " / "
+
   def pretty(t: Type): String = t match {
     case Unknown => "?"
+    case Fun(a,n,b) => s"${prettyb(a)} => ${pretty(b)}"
     case _ => t.toString
+  }
+
+  def prettyb(t: Type): String = t match {
+    case Fun(a,n,b) => s"(${prettyb(a)} => ${pretty(b)})"
+    case _ => pretty(t)
   }
 
 
@@ -314,6 +455,9 @@ object Test {
     case If(c,a,b) =>
       transN(c)(cps,env) { x => if (x.asInstanceOf[Boolean]) transN(a)(cps,env)(k) else transN(b)(cps,env)(k) }
   
+    case Up(x) => 
+      transN(x)(cps,env)(k) // XXX no-op here -- wasn't needed
+
     case Shift(Lam(x,n,t,y)) => //shift((k: T => U) => U): T @cps[U]
 
       cps match {  // one level lower
@@ -354,21 +498,21 @@ object Test {
 
     implicit val env = Map[String,EType]()
 
-    typeCheck(Exit(Const(7)), Void)
+    typeCheckA(Exit(Const(7)), Void)
 
-    typeCheck(If(Const(true),Exit(Const(1)), Exit(Const(0))), Void)
+    typeCheckA(If(Const(true),Exit(Const(1)), Exit(Const(0))), Void)
 
-    typeCheck(Let("k", 1, Lam("x", 1, Nat, Exit(Var("x"))),
+    typeCheckA(Let("k", 1, Lam("x", 1, Nat, Exit(Var("x"))),
                   App(Var("k"), Const(3))), Void)
 
 
-    typeCheck(Reset(Var("x")), List(Unit))(Map("x" -> List(Unit,Unit)))
+    typeCheckA(Reset(Var("x")), List(Unit))(Map("x" -> List(Unit,Unit)))
 
 
 
     // reset { shift(k => k(7)) }
 
-    typeCheck(Reset(Shift(Lam("k",1,Fun(Nat,1,List(Nat)),
+    typeCheckA(Reset(Shift(Lam("k",1,Fun(Nat,1,List(Nat)),
                                     App(Var("k"), Const(7))))), List(Nat))
 
 
@@ -419,6 +563,22 @@ object Test {
       println(z)
       assert(x == z)
     }
+
+    def genMod2(t: Tree, x: Any) = {
+      nNames = 0
+      val p = fromScala(t)
+      println(pretty(p))
+      val p1 = typeCheck(p,Nil)
+      println(pretty(p1))
+      val ys = trans0(p1)(Map())
+      val y = fromScala(ys)
+      println(pretty(y))
+      val z = evalStd(y) { x => x}
+      println(z)
+      assert(x == z)
+    }
+
+
 
 
     println("--- std ---")
@@ -506,6 +666,27 @@ object Test {
     genMod(q"exit(reset(1 + reset(2 * (x => shift(k1 => shift(k0 => k0(k1(x)))))(1))))", 3)
 
 
+    println("--- mod2 gen ---")
+
+    genMod2(q"exit(((x:Nat) => x)(1))", 1)
+    genMod2(q"exit(reset(2))", 2)
+    genMod2(q"exit(reset(shift(k => k(2))))", 2)
+
+    genMod2(q"exit(reset(2 * shift(k => 1)))", 1)
+    genMod2(q"exit(reset(2 * shift(k => k(1))))", 2)
+    genMod2(q"exit(reset(2 * shift(k => k(k(1)))))", 4)
+    genMod2(q"exit(reset(2 * shift(k => k(k(k(1))))))", 8)
+
+    genMod2(q"exit(1 + shift(k => exit(5)))", 5)
+    genMod2(q"exit(1 + shift(k => k(1)))", 2)
+
+    // this does not type check!!!
+    // genMod2(q"exit(reset(1 + reset(2 * shift(k1 => shift(k0 => k0(k1(1)))))))", 3)
+    genMod2(q"exit(reset(1 + reset(2 * shift(k1 => k1(shift(k0 => k0(1)))))))", 3)
+
+    // this does not type check!!!
+    // genMod2(q"exit(reset(1 + reset(2 * (x => shift(k1 => shift(k0 => k0(k1(x)))))(1))))", 3)
+    genMod2(q"exit(reset(1 + reset(2 * ((x:Nat) => shift(k1 => k1(shift(k0 => k0(x)))))(1))))", 3)
 
 
 
