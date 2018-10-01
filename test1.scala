@@ -443,6 +443,16 @@ object Test {
     case Times(x,y) =>          transN(x)(cps,env) { u => transN(y)(cps,env) { v => k(q"$u * $v") }}
     case Var(x) =>              k(q"${env(x)}")
 
+    case Lam(x,n,tp,y) if t.tpe ne null =>
+      val Fun(t1,_,ts2)::rest = t.tpe
+      val (x1,k1) = (fresh("x"),fresh("k"))
+      if (ts2.length > 0)
+        k(q"(($x1:Any) => ($k1:Any) => ${ transN(y)(cps,env + (x -> x1))(Eta(k1)) })")
+      else
+        k(q"(($x1:Any) => ${ trans0(y)(env + (x -> x1)) })")
+
+      // as many continuations as necessary??
+
     case Lam(x,n,t,y) =>        
       val (x1,k1) = (fresh("x"),fresh("k"))
       k(q"(($x1:Any) => ($k1:Any) => ${ transN(y)(cps,env + (x -> x1))(Eta(k1)) })")
@@ -457,6 +467,12 @@ object Test {
   
     case Up(x) => 
       transN(x)(cps,env)(k) // XXX no-op here -- wasn't needed
+
+    case Shift(f) if f.tpe ne null => //shift((k: T => U) => U): T @cps[U]
+      transN[A](f)(cps,env) { f1 =>
+        val ks = eta(k)
+        q"$f1($ks)"
+      }
 
     case Shift(Lam(x,n,t,y)) => //shift((k: T => U) => U): T @cps[U]
 
@@ -692,8 +708,8 @@ object Test {
 
     // TODO:
     // + codegen
+    // + typing
     // - tupled instead of curried args
-    // - typing
 
     println("DONE")
   }
