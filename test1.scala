@@ -436,6 +436,12 @@ object Test {
       q"(($z:Any) => ${f(q"$z")})"
   }
 
+
+  // why does this work?
+  // a single continuation is enough to CPS transform, the result in general is
+  // a lambda that expects further continuations (just like nested monads)
+  // type T becomes (T => Void) => Void
+  // or (T => (U => Void) => Void) => (U => Void) => Void   =   (T => A) => A 
   def transN[A](t: Term)(cps: CPS[A], env: Map[String,Tree])(k: Tree => Tree): Tree = t match {
     case Const(x: Int) =>       k(Literal(Constant(x)))
     case Const(x: Boolean) =>   k(Literal(Constant(x)))
@@ -506,6 +512,83 @@ object Test {
 
       q"${ (transN(x)(CN(cps),env)(x => q"(($k1: Any) => $k1($x))")) } ($ks)" // one level higher
   }
+
+// alt signature: 
+//    k: List[Tree]           continuation symbols
+//    k: List[Tree => Tree]   continuation contexts
+//
+// def transN2(t: Term)(env: Map[String,Tree]): Tree = t match {
+//     case Const(x: Int) =>
+//       if (n == 0) {
+//         Literal(Constant(x))
+//       } else if (n == 1) {
+//         val c = Literal(Constant(x))
+//         q"(k:Nat => Void) => k($c)"
+//       } else if (n == 2) {
+//         val c = Literal(Constant(x))
+//         q"(k1:Nat => (Nat => Void) => Void) => (k2:Nat => Void) => k1($c)(k2)"
+//         //q"(k1:Nat => (Nat => Void) => Void) => (k2:Nat => Void) => k1($c)(k2)"
+//         //q"(k1:Nat => (Nat => Void) => Void) => k1($c)"
+//         // but
+//         //q"(k1:Nat x (Nat => Void) => Void), (k2:Nat => Void) => k1($c,k2)"
+//       }
+
+//       // (Nat => Void)
+//       // Nat => (Nat => Void)
+//       def consume(ks: List[Tree]): Tree => Tree = k match {
+//         case k::ks =>
+//           (x => k(x,ks))
+
+//         case Nil => (x => x)
+//       }
+
+//       k(Literal(Constant(x)))
+
+// }
+
+  def app(x: Tree, y: Tree) = q"$x($y)" //x match { case Eta(f) => f(y) case _ => q"$x($y)" }
+  def fun(x: Tree => Tree) = eta(x)
+
+  def transTrivial0(t: Term)(implicit env: Map[String,Tree]): Tree = t match {
+    case Exit(x) =>             app(transTrivial(x)(env), fun(x => q"exit($x)"))
+    case App(f, x) => 
+      app(transTrivial(f)(env), fun { u => app(transTrivial(x)(env), fun { v => app(u,v) })})
+  }
+  def transTrivial(t: Term)(env: Map[String,Tree]): Tree = t match {
+    case Const(x: Int) =>       fun(k => app(k, (Literal(Constant(x)))))
+    case Const(x: Boolean) =>   fun(k => app(k, (Literal(Constant(x)))))
+    case Plus(x,y) =>           fun(k => app(transTrivial(x)(env), fun { u => app(transTrivial(y)(env), fun { v => app(k, q"$u + $v") })}))
+    case Times(x,y) =>          fun(k => app(transTrivial(x)(env), fun { u => app(transTrivial(y)(env), fun { v => app(k, q"$u * $v") })}))
+    case Var(x) =>              fun(k => app(k, (env(x))))
+
+    case Lam(x,n,tp,y) =>
+      val Fun(t1,_,ts2)::rest = t.tpe
+      if (ts2.length > 0)
+        fun(k => app(k, fun(x1 => transTrivial(y)(env + (x -> x1)) )))
+      else 
+        fun(k => app(k, fun(x1 => transTrivial0(y)(env + (x -> x1))))) // do not cps transform!
+      // as many continuations as necessary??
+
+    case App(x,y) =>            
+      fun(k => app(transTrivial(x)(env), fun { u => app(transTrivial(y)(env), fun { v => app(app(u,v),k) })}))
+
+    // case If(c,a,b) =>
+    //   transN(c)(cps,env) { x => if (x.asInstanceOf[Boolean]) transN(a)(cps,env)(k) else transN(b)(cps,env)(k) }
+  
+    // case Up(x) => 
+    //   transN(x)(cps,env)(k) // XXX no-op here -- wasn't needed
+
+    case Shift(f) => //shift((k: T => U) => U): T @cps[U]
+      fun(k => app(transTrivial(f)(env), fun { f1 =>
+        app(f1,k)
+      }))
+
+    case Reset(x) => 
+      app(transTrivial(x)(env), fun(x => fun(k => app(k,x)))) // one level higher: result expects to be called with k!
+      // fun(k => app(..., k))
+  }
+
+
 
 
 
@@ -586,12 +669,20 @@ object Test {
       println(pretty(p))
       val p1 = typeCheck(p,Nil)
       println(pretty(p1))
-      val ys = trans0(p1)(Map())
+
+      {val ys = trans0(p1)(Map())
       val y = fromScala(ys)
       println(pretty(y))
       val z = evalStd(y) { x => x}
       println(z)
-      assert(x == z)
+      assert(x == z)}
+
+      {val ys = transTrivial0(p1)(Map())
+      val y = fromScala(ys)
+      println(pretty(y))
+      val z = evalStd(y) { x => x}
+      println(z)
+      assert(x == z)}
     }
 
 
