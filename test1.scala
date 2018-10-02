@@ -834,6 +834,78 @@ object Test {
           k(app(u,v)) }}
 
     }
+
+    def evalLLP(t: Term): Any = {
+      var fs = Map[String,Term]()
+      var mem = new Array[Any](1000)
+      var sp = 0
+      var fp = 0
+      var hp = 100
+
+      val exit = (x: Any) => return x
+
+      def evalLLS(t: Term): Unit = t match {
+        case Let(x1,n1,y: Lam,z) => 
+          fs += (x1 -> y)
+          evalLLS(z)
+        case App(f,x) =>
+          println("-- "+pretty(t))
+          evalLLE(f)
+          //println("  "+mem(sp-1))
+          evalLLE(x)
+          //println("  "+mem(sp-1))
+
+          //println(mem(fp))
+
+          val Lam(x2,n2,t2,y2) = mem(sp-2)
+          //sp = mem(sp-1).asInstanceOf[Int]
+          fp = sp-1
+          evalLLS(y2)
+        case Exit(x) =>
+          evalLLE(x)
+      }
+
+      def evalLLE(t: Term): Unit = t match {
+        case Const(x) =>       mem(sp) = x; sp += 1
+        case Var(x) if fs contains x => mem(sp) = fs(x); sp += 1 // functions
+        case Var(x) =>         mem(sp) = mem(fp); sp += 1
+
+        case Times(x,y) =>
+          evalLLE(x)
+          evalLLE(y)
+          mem(sp-2) = mem(sp-2).asInstanceOf[Int] * mem(sp-1).asInstanceOf[Int]; sp -= 1
+
+        case Plus(x,y) =>
+          evalLLE(x)
+          evalLLE(y)
+          mem(sp-2) = mem(sp-2).asInstanceOf[Int] + mem(sp-1).asInstanceOf[Int]; sp -= 1
+
+        case Field(x,n) =>     
+          evalLLE(x)
+          val tup = mem(sp-1)
+          mem(sp-1) = mem(tup.asInstanceOf[Int] + n)
+          //println("field " + mem(sp-1) + " " + n + " = " + mem(sp-1))
+
+        case Tuple(xs) =>
+
+          // copy into "heap" region
+          val cur = sp
+          xs foreach evalLLE
+          val start = hp
+          for (i <- cur until sp) {
+            mem(hp) = mem(i); hp += 1
+          }
+          sp = cur
+
+          mem(sp) = start; sp += 1
+      }
+
+      evalLLS(t)      
+      mem(sp-1)
+
+    }
+
+
 //(z0 => z1 => (z2 => z3 => (z4 => z5 => z4(z0)(z5))(z6 => z2(z6)(z3)))(z1))(1)(z7 => z8 => z8(2 * z7))(z9 => z10 => z10(1 + z9))(z11 => exit(z11))
 
 
@@ -944,6 +1016,18 @@ object Test {
       val z = evalStd(y) { x => x}
       println(" "+z)
       assert(x == z)}
+
+
+      {nNames = 0
+      val y0 = transFullEta(p1)(Map())
+      val y1 = lambdaLift(y0)(Map())(x => x)
+      val y = hoist(y1)(Map()) { x => x}
+      println(" "+pretty(y))
+      val z = evalLLP(y)
+      println(" "+z)
+      assert(x == z)
+      }
+
     }
 
 
