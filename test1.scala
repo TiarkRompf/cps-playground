@@ -275,6 +275,7 @@ object Test {
     case ILam(f) => s"(.. => ..)"
     case Tuple(xs) => xs map pretty mkString ","
     case Field(x,n) => s"${pretty(x)}.$n"
+    case Let(x,n,y,z) => s"val $x = ${pretty(y)}\n${pretty(z)}"
   }
 
   def prettyb(t: Term): String = t match {
@@ -307,14 +308,19 @@ object Test {
     case Times(x,y) =>          evalStd(x) { u => evalStd(y) { v => k(u.asInstanceOf[Int] * v.asInstanceOf[Int]) }}
     case Var(x) =>              k(env(x))
 
-    case Tuple(List(x,y)) =>    evalStd(x) { u => evalStd(y) { v => k(List(u,v)) }}
-    case Tuple(List(x,y,z)) =>  evalStd(x) { u => evalStd(y) { v => evalStd(z) { w => k(List(u,v,w)) }}}
-    case Tuple(List(x,y,z,a)) =>evalStd(x) { u => evalStd(y) { v => evalStd(z) { w => evalStd(a) { d => k(List(u,v,w,d)) }}}}
+    case Tuple(xs) =>           def rec(xs: List[Term])(k: List[Any] => Any): Any = xs match {
+                                  case Nil => k(Nil)
+                                  case x::xs => evalStd(x) { u => rec(xs) { us => k(u::us) }}
+                                }
+                                rec(xs) { us => k(us) }
+
     case Field(x,n) =>          evalStd(x) { u => k(u.asInstanceOf[List[Any]](n)) }
 
     case Lam(x,n,t,y) =>        k((x1:Any) => (k1:Any => Any) => evalStd(y)(k1)(env + (x -> x1))) // same level!
 
     case App(x,y) =>            evalStd(x) { u => evalStd(y) { v => u.asInstanceOf[Any => (Any => Any) => Any](v)(k) }}
+
+    case Let(x,n,y,z) =>        evalStd(y) { u => evalStd(z)(k)(env + (x -> u)) }
 
     case If(c,a,b) =>
       evalStd(c) { x => if (x.asInstanceOf[Boolean]) evalStd(a)(k) else evalStd(b)(k) }
@@ -329,6 +335,8 @@ object Test {
       k(evalStd(x)(x => x)) // same level
 
     case Exit(x) => evalStd(x) { u => u }
+
+
   }
 
   var nNames = 0
@@ -620,9 +628,14 @@ object Test {
   }
 
 
+  // note: fully eta expanded, always pass n continuations
   def transFullEta(t: Term)(env: Map[String,Term]): Term = t match {
     case Const(x: Int) =>       ifun(k => app(k, (Const(x))))
     case Const(x: Boolean) =>   ifun(k => app(k, (Const(x))))
+    case Var(x) =>              ifun(k => app(k, (env(x))))
+
+    case Exit(x) =>             app(transFullEta(x)(env), ifun(x => Exit(x)))
+
     case Plus(x,y)  if x.tpe.length == 1 && y.tpe.length == 1 =>
                                 ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(k, Plus(u,v)) })}))
 
@@ -648,9 +661,6 @@ object Test {
           app(transFullEta(y)(env), ifun { (v,vk2,vk3) => 
             app(k1, Times(u,v), vk2, vk3) }, k2, k3)}))
 
-    case Var(x) =>              ifun(k => app(k, (env(x))))
-
-    case Exit(x) =>             app(transFullEta(x)(env), ifun(x => Exit(x)))
 
     case Lam(x,n,tp,y) =>
       val Fun(t1,_,ts2)::rest = t.tpe
@@ -674,7 +684,7 @@ object Test {
         case 2 =>
           // ifun(k1 => ifun(k2 => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(app(app(u,v),k1),k2) })})))
 
-          assert(x.tpe.length == 1)
+          assert(x.tpe.length == 1) // special cases ...
           assert(y.tpe.length == 2)
 
           ifun((k1,k2) => 
@@ -683,7 +693,7 @@ object Test {
             ))
 
         case 3 =>
-          assert(x.tpe.length == 1)
+          assert(x.tpe.length == 1) // special cases ...
           assert(y.tpe.length == 1)
           ifun((k1,k2,k3) =>
             app(transFullEta(x)(env), ifun { u => 
@@ -737,6 +747,54 @@ object Test {
 
 
 
+  def freeVars(t: Term): Set[String] = t match {
+    case Const(x) =>            Set()
+    case Plus(x,y) =>           freeVars(x) ++ freeVars(y)
+    case Times(x,y) =>          freeVars(x) ++ freeVars(y)
+    case Var(x) =>              Set(x)
+
+    case Field(x,n) =>          freeVars(x)
+    case Tuple(xs) =>           (xs map freeVars).reduce(_ ++ _)
+
+    case Exit(x) =>             freeVars(x)
+
+    case Lam(x,n,tp,y) =>       freeVars(y) - x
+
+    case App(x,y) =>            freeVars(x) ++ freeVars(y)
+  }
+
+  def lambdaLift(t: Term)(env: Map[String,Term])(k: Term => Term): Term = t match {
+    case Const(x: Int) =>       k(Const(x))
+    case Const(x: Boolean) =>   k(Const(x))
+    case Plus(x,y) =>           lambdaLift(x)(env) { u => lambdaLift(y)(env) { v => k(Plus(u,v)) }}
+    case Times(x,y) =>          lambdaLift(x)(env) { u => lambdaLift(y)(env) { v => k(Times(u,v)) }}
+    case Var(x) =>              k(env(x))
+
+    case Field(x,n) =>          lambdaLift(x)(env) { u => k(Field(u,n)) }
+    case Tuple(xs) =>           def rec(xs: List[Term])(k: List[Term] => Term): Term = xs match {
+                                  case Nil => k(Nil)
+                                  case x::xs => lambdaLift(x)(env) { u => rec(xs) { us => k(u::us) }}
+                                }
+                                rec(xs) { us => k(Tuple(us)) }
+
+    case Exit(x) =>             lambdaLift(x)(env) { x => k(Exit(x)) }
+
+    case Lam(x,n,tp,y) =>
+      val free = freeVars(t).toList
+      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i))).toMap
+
+      val f = fun((e1,x1) => lambdaLift(y)(env ++ lookup(e1) + (x -> x1))(x => x))
+
+      val e1 = Tuple(free map env)
+      val cl = Tuple(List(f, e1))
+      k(cl)
+
+    case App(x,y) =>
+      lambdaLift(x)(env) { u => lambdaLift(y)(env) { v => 
+        k(app(field(u,0),field(u,1),v)) }}
+
+
+  }
 //(z0 => z1 => (z2 => z3 => (z4 => z5 => z4(z0)(z5))(z6 => z2(z6)(z3)))(z1))(1)(z7 => z8 => z8(2 * z7))(z9 => z10 => z10(1 + z9))(z11 => exit(z11))
 
 
@@ -835,6 +893,14 @@ object Test {
 
       {nNames = 0
       val y = transFullEta(p1)(Map())
+      println(" "+pretty(y))
+      val z = evalStd(y) { x => x}
+      println(" "+z)
+      assert(x == z)}
+
+      {nNames = 0
+      val y0 = transFullEta(p1)(Map())
+      val y = lambdaLift(y0)(Map())(x => x)
       println(" "+pretty(y))
       val z = evalStd(y) { x => x}
       println(" "+z)
