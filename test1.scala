@@ -19,7 +19,10 @@ object Test {
   case class Exit(x: Term) extends Term
 
   case class ILam(f: Term => Term) extends Term
-  case class Tuple(x: Term, y: Term) extends Term
+
+  case class Tuple(xs: List[Term]) extends Term
+  case class Field(x: Term, y: Int) extends Term
+
 
   case object Unknown extends Type
   case object Unit extends Type
@@ -528,7 +531,10 @@ object Test {
     case _ => App(x,proper(y))
   }
 
-  def ifun(f: Term => Term) = ILam(f)
+  def ifun(f: Term => Term): Term = ILam(f)
+  def ifun(f: (Term, Term) => Term): Term = ifun(x => ifun(y => f(x,y)))
+  def ifun(f: (Term, Term, Term) => Term): Term = ifun(x => ifun(y => ifun(z => f(x,y,z))))
+
 
   def fun(f: Term => Term): Term = {
       val z = freshv("z")
@@ -547,6 +553,23 @@ object Test {
   def app(f: Term, x: Term, y: Term): Term = {
       app(app(f,x),y)
   }
+
+  def fun(f: (Term, Term, Term) => Term): Term = {
+      fun(x => fun(y => fun(z => f(x,y,z))))
+  }
+
+  def app(f: Term, x: Term, y: Term, z: Term): Term = {
+      app(app(app(f,x),y),z)
+  }
+
+  def fun(f: (Term, Term, Term, Term) => Term): Term = {
+      fun(x => fun(y => fun(z => fun(u => f(x,y,z,u)))))
+  }
+
+  def app(f: Term, x: Term, y: Term, z: Term, u: Term): Term = {
+      app(app(app(app(f,x),y),z),u)
+  }
+
 
   // note: without eta in Lam case, result is identical to transN above
   def transTrivial(t: Term)(env: Map[String,Term]): Term = t match {
@@ -605,39 +628,41 @@ object Test {
 
     case Lam(x,n,tp,y) =>
       val Fun(t1,_,ts2)::rest = t.tpe
-      if (ts2.length > 0) {
-        def eta(n: Int, x: Term): Term = 
-          if (n > 0) fun(k => app(eta(n-1,x),k)) else x
-        ifun(k => app(k, fun(x1 => eta(ts2.length, transFullEta(y)(env + (x -> x1))))))
+      ts2.length match {
+        case 0 =>
+          ifun(k => app(k, fun(x1 => transFullEta(y)(env + (x -> x1))))) // do not cps transform!
+        case 1 =>
+          ifun(k => app(k, fun((x1,k1) => app(transFullEta(y)(env + (x -> x1)), k1)))) // XXX app with k1 ok? assume suitably expanded ...
+        case 2 =>
+          ifun(k => app(k, fun((x1,k1,k2) => app(transFullEta(y)(env + (x -> x1)), k1, k2))))
+        case 3 =>
+          ifun(k => app(k, fun((x1,k1,k2,k3) => app(transFullEta(y)(env + (x -> x1)), k1, k2, k3))))
       }
-      else 
-        ifun(k => app(k, fun(x1 => transFullEta(y)(env + (x -> x1))))) // do not cps transform!
-      // as many continuations as necessary?? 
 
     case App(x,y) =>
       t.tpe.length match {
         case 0 =>
           app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(u,v) })})
         case 1 =>
-          ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(app(u,v),k) })}))
+          ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(u,v,k) })}))
         case 2 =>
           // ifun(k1 => ifun(k2 => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(app(app(u,v),k1),k2) })})))
 
           assert(x.tpe.length == 1)
           assert(y.tpe.length == 2)
 
-          ifun(k1 => ifun(k2 => 
+          ifun((k1,k2) => 
             app(transFullEta(x)(env), ifun { u => 
               app(app(transFullEta(y)(env), ifun { v => ifun { vk => app(app(app(u,v),k1),vk) }}), k2)}
-            )))
+            ))
 
         case 3 =>
           assert(x.tpe.length == 1)
           assert(y.tpe.length == 1)
-          ifun(k1 => ifun(k2 => ifun(k3 => 
+          ifun((k1,k2,k3) =>
             app(transFullEta(x)(env), ifun { u => 
               app(transFullEta(y)(env), ifun { v => 
-                app(app(app(app(u,v),k1),k2),k3) })}))))
+                app(app(app(app(u,v),k1),k2),k3) })}))
       }
 
     // case If(c,a,b) =>
@@ -647,32 +672,35 @@ object Test {
     //   transN(x)(cps,env)(k) // XXX no-op here -- wasn't needed
 
     case Shift(f) => //shift((k: T => U) => U): T @cps[U]
+      assert(f.tpe.length == 1)
       t.tpe.length match {
         case 1 =>
           ifun(k => 
-            app(transFullEta(f)(env), ifun { f1 => // multiple continuations, turn them into one passes to f
+            app(transFullEta(f)(env), ifun { f1 => // assume f has level 1
               app(f1, k)
           }))
         case 2 =>
-          ifun(k1 => ifun(k2 => 
-            app(transFullEta(f)(env), ifun { f1 => // multiple continuations, turn them into one passes to f
-              app(app(f1,k1),k2)
-          })))
+          ifun((k1,k2) => 
+            app(transFullEta(f)(env), ifun { f1 => // assume f has level 1
+              app(f1,k1,k2)
+          }))
         case 3 =>
-          ifun(k1 => ifun(k2 => ifun(k3 => 
-            app(transFullEta(f)(env), ifun { f1 => // multiple continuations, turn them into one passes to f
-              app(app(app(f1,k1),k2),k3)
-          }))))
+          ifun((k1,k2,k3) => 
+            app(transFullEta(f)(env), ifun { f1 => // assume f has level 1
+              app(f1,k1,k2,k3)
+          }))
       }  
 
     case Reset(x) => 
+      assert(x.tpe.length == 1 && t.tpe.length == 1 || // special case
+             x.tpe.length == t.tpe.length + 1)
       t.tpe.length match {
         case 1 =>
-          val id1 = ifun(x => ifun(k => app(k,x)))
-          ifun(k => app(app(transFullEta(x)(env), id1), k))
+          val id1 = ifun((x,k) => app(k,x))
+          ifun(k => app(transFullEta(x)(env), id1, k))
         case 2 =>
-          val id2 = ifun(x => ifun(k1 => ifun(k2 => app(app(k1,x),k2))))
-          ifun(k1 => ifun(k2 => app(app(app(transFullEta(x)(env), id2), k1), k2)))
+          val id2 = ifun((x,k1,k2) => app(k1,x,k2))
+          ifun((k1,k2) => app(transFullEta(x)(env), id2, k1, k2))
       }
       // one level higher: result expects to be called with k!
       // fun(k => app(..., k))
