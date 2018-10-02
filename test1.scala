@@ -795,6 +795,45 @@ object Test {
 
 
   }
+
+
+    def hoist(t: Term)(env: Map[String,Term])(k: Term => Term): Term = t match {
+      case Const(x: Int) =>       k(Const(x))
+      case Const(x: Boolean) =>   k(Const(x))
+      case Plus(x,y) =>           hoist(x)(env) { u => hoist(y)(env) { v => k(Plus(u,v)) }}
+      case Times(x,y) =>          hoist(x)(env) { u => hoist(y)(env) { v => k(Times(u,v)) }}
+      case Var(x) =>              k(env(x))
+
+      case Field(x,n) =>          hoist(x)(env) { u => k(Field(u,n)) }
+      case Tuple(xs) =>           def rec(xs: List[Term])(k: List[Term] => Term): Term = xs match {
+                                    case Nil => k(Nil)
+                                    case x::xs => hoist(x)(env) { u => rec(xs) { us => k(u::us) }}
+                                  }
+                                  rec(xs) { us => k(Tuple(us)) }
+
+      case Exit(x) =>             hoist(x)(env) { x => k(Exit(x)) }
+
+      case Lam(x,n,tp,y) =>
+        val f = fun(x1 => hoist(y)(env + (x -> x1))(x => x))
+
+        val name = freshv("f").x
+
+        // (x => let f = (y => ...); rest) => let f = (y => ...); (x => rest)
+
+        def shuffle(x: Term)(k: Term => Term): Term = x match {
+          case Lam(x1,n1,t1,Let(x2,n2,f: Lam,rest)) => Let(x2,n2,f, shuffle(Lam(x1,n1,t1,rest))(k))
+          case _ => k(x)
+        }
+
+        shuffle(f) { f => 
+          Let(name,0,f, k(Var(name)))
+        }
+
+      case App(x,y) =>
+        hoist(x)(env) { u => hoist(y)(env) { v => 
+          k(app(u,v)) }}
+
+    }
 //(z0 => z1 => (z2 => z3 => (z4 => z5 => z4(z0)(z5))(z6 => z2(z6)(z3)))(z1))(1)(z7 => z8 => z8(2 * z7))(z9 => z10 => z10(1 + z9))(z11 => exit(z11))
 
 
