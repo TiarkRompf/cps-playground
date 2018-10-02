@@ -273,6 +273,8 @@ object Test {
     case Reset(x) => s"reset(${prettyb(x)})"
     case Shift(x) => s"shift(${prettyb(x)})"
     case ILam(f) => s"(.. => ..)"
+    case Tuple(xs) => xs map pretty mkString ","
+    case Field(x,n) => s"${pretty(x)}.$n"
   }
 
   def prettyb(t: Term): String = t match {
@@ -304,6 +306,11 @@ object Test {
     case Plus(x,y) =>           evalStd(x) { u => evalStd(y) { v => k(u.asInstanceOf[Int] + v.asInstanceOf[Int]) }}
     case Times(x,y) =>          evalStd(x) { u => evalStd(y) { v => k(u.asInstanceOf[Int] * v.asInstanceOf[Int]) }}
     case Var(x) =>              k(env(x))
+
+    case Tuple(List(x,y)) =>    evalStd(x) { u => evalStd(y) { v => k(List(u,v)) }}
+    case Tuple(List(x,y,z)) =>  evalStd(x) { u => evalStd(y) { v => evalStd(z) { w => k(List(u,v,w)) }}}
+    case Tuple(List(x,y,z,a)) =>evalStd(x) { u => evalStd(y) { v => evalStd(z) { w => evalStd(a) { d => k(List(u,v,w,d)) }}}}
+    case Field(x,n) =>          evalStd(x) { u => k(u.asInstanceOf[List[Any]](n)) }
 
     case Lam(x,n,t,y) =>        k((x1:Any) => (k1:Any => Any) => evalStd(y)(k1)(env + (x -> x1))) // same level!
 
@@ -531,44 +538,40 @@ object Test {
     case _ => App(x,proper(y))
   }
 
-  def ifun(f: Term => Term): Term = ILam(f)
-  def ifun(f: (Term, Term) => Term): Term = ifun(x => ifun(y => f(x,y)))
-  def ifun(f: (Term, Term, Term) => Term): Term = ifun(x => ifun(y => ifun(z => f(x,y,z))))
+  def proper(f: Term): Term = f match {
+    case ILam(f) => fun(f)
+    case Tuple(xs) => Tuple(xs map proper)
+    case _ => f
+  }
 
+  def ifun(f: Term => Term): Term = ILam(f)
+
+  def field(x: Term, n: Int): Term = x match {
+    case Tuple(xs) => xs(n)
+    case _ => Field(x,n)
+  }
+
+  def explode(f: (Term, Term) => Term)(x: Term): Term = f(field(x,0),field(x,1))
+  def explode(f: (Term, Term, Term) => Term)(x: Term): Term = f(field(x,0),field(x,1),field(x,2))
+  def explode(f: (Term, Term, Term, Term) => Term)(x: Term): Term = f(field(x,0),field(x,1),field(x,2),field(x,3))
 
   def fun(f: Term => Term): Term = {
       val z = freshv("z")
       Lam(z.x,1,Unknown,proper(f(z)))
   }
 
-  def proper(f: Term): Term = f match {
-    case ILam(f) => fun(f)
-    case _ => f
-  }
 
-  def fun(f: (Term, Term) => Term): Term = {
-      fun(x => fun(y => f(x,y)))
-  }
+  def ifun(f: (Term, Term) => Term): Term = ifun(explode(f)_)
+  def ifun(f: (Term, Term, Term) => Term): Term = ifun(explode(f)_)
 
-  def app(f: Term, x: Term, y: Term): Term = {
-      app(app(f,x),y)
-  }
 
-  def fun(f: (Term, Term, Term) => Term): Term = {
-      fun(x => fun(y => fun(z => f(x,y,z))))
-  }
+  def fun(f: (Term, Term) => Term): Term = fun(explode(f)_)
+  def fun(f: (Term, Term, Term) => Term): Term = fun(explode(f)_)
+  def fun(f: (Term, Term, Term, Term) => Term): Term = fun(explode(f)_)
 
-  def app(f: Term, x: Term, y: Term, z: Term): Term = {
-      app(app(app(f,x),y),z)
-  }
-
-  def fun(f: (Term, Term, Term, Term) => Term): Term = {
-      fun(x => fun(y => fun(z => fun(u => f(x,y,z,u)))))
-  }
-
-  def app(f: Term, x: Term, y: Term, z: Term, u: Term): Term = {
-      app(app(app(app(f,x),y),z),u)
-  }
+  def app(f: Term, x: Term, y: Term): Term = app(f, Tuple(List(x,y)))
+  def app(f: Term, x: Term, y: Term, z: Term): Term = app(f, Tuple(List(x,y,z)))
+  def app(f: Term, x: Term, y: Term, z: Term, u: Term): Term = app(f, Tuple(List(x,y,z,u)))
 
 
   // note: without eta in Lam case, result is identical to transN above
@@ -620,8 +623,31 @@ object Test {
   def transFullEta(t: Term)(env: Map[String,Term]): Term = t match {
     case Const(x: Int) =>       ifun(k => app(k, (Const(x))))
     case Const(x: Boolean) =>   ifun(k => app(k, (Const(x))))
-    case Plus(x,y) =>           ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(k, Plus(u,v)) })}))
-    case Times(x,y) =>          ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(k, Times(u,v)) })}))
+    case Plus(x,y)  if x.tpe.length == 1 && y.tpe.length == 1 =>
+                                ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(k, Plus(u,v)) })}))
+
+    case Plus(x,y) if x.tpe.length == 1 && y.tpe.length == 2 =>
+      ifun((k1,k2) => 
+        app(transFullEta(x)(env), ifun { u => 
+          app(transFullEta(y)(env), ifun { (v,vk) => 
+            app(k1, Plus(u,v), vk) }, k2)}))
+
+
+    case Times(x,y) if x.tpe.length == 1 && y.tpe.length == 1 =>
+                                ifun(k => app(transFullEta(x)(env), ifun { u => app(transFullEta(y)(env), ifun { v => app(k, Times(u,v)) })}))
+
+    case Times(x,y) if x.tpe.length == 1 && y.tpe.length == 2 =>
+      ifun((k1,k2) => 
+        app(transFullEta(x)(env), ifun { u => 
+          app(transFullEta(y)(env), ifun { (v,vk) => 
+            app(k1, Times(u,v), vk) }, k2)}))
+
+    case Times(x,y) if x.tpe.length == 1 && y.tpe.length == 3 =>
+      ifun((k1,k2,k3) => 
+        app(transFullEta(x)(env), ifun { u => 
+          app(transFullEta(y)(env), ifun { (v,vk2,vk3) => 
+            app(k1, Times(u,v), vk2, vk3) }, k2, k3)}))
+
     case Var(x) =>              ifun(k => app(k, (env(x))))
 
     case Exit(x) =>             app(transFullEta(x)(env), ifun(x => Exit(x)))
@@ -653,7 +679,7 @@ object Test {
 
           ifun((k1,k2) => 
             app(transFullEta(x)(env), ifun { u => 
-              app(app(transFullEta(y)(env), ifun { v => ifun { vk => app(app(app(u,v),k1),vk) }}), k2)}
+              app(transFullEta(y)(env), ifun { (v,vk) => app(u,v,k1,vk) }, k2)}
             ))
 
         case 3 =>
@@ -662,7 +688,7 @@ object Test {
           ifun((k1,k2,k3) =>
             app(transFullEta(x)(env), ifun { u => 
               app(transFullEta(y)(env), ifun { v => 
-                app(app(app(app(u,v),k1),k2),k3) })}))
+                app(u,v,k1,k2,k3) })}))
       }
 
     // case If(c,a,b) =>
@@ -691,9 +717,12 @@ object Test {
           }))
       }  
 
-    case Reset(x) => 
-      assert(x.tpe.length == 1 && t.tpe.length == 1 || // special case
-             x.tpe.length == t.tpe.length + 1)
+    case Reset(x) if x.tpe.length == t.tpe.length => // special case
+      assert(x.tpe.length == 1)
+      transFullEta(x)(env)
+
+    case Reset(x) =>
+      assert(x.tpe.length == t.tpe.length + 1)
       t.tpe.length match {
         case 1 =>
           val id1 = ifun((x,k) => app(k,x))
