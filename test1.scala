@@ -9,7 +9,7 @@ object Test {
   case class Var(x: String) extends Term
   case class Lam(x: String, n: Int, t: Type, y: Term) extends Term
   case class App(f: Term, x: Term) extends Term
-  case class Let(x: String, n: Int, y: Term, z: Term) extends Term
+  case class Let(x: String, n: Int, t: Type, y: Term, z: Term) extends Term
   case class If(c: Term, a: Term, b: Term) extends Term
   case class Plus(x: Term, y: Term) extends Term
   case class Times(x: Term, y: Term) extends Term
@@ -64,7 +64,7 @@ object Test {
       val ty = typeInfer(a).tpe
       typeCheck(b, ty)
       seq(e1,ty)
-    case Let(x, n, y, z) => 
+    case Let(x, n, t, y, z) => 
       val ty = typeInfer(y).tpe
       val ty1 = typeInfer(z)(env + (x -> List(ty.head))).tpe
       seq(ty,ty1)
@@ -135,6 +135,24 @@ object Test {
       val a1 = typeCheck(a, Nat::ty.tail) // 
       val b1 = typeCheck(b, Nat::ty.tail)
       Times(a1, b1) withType Nat::comb(a1.tpe.tail, b1.tpe.tail)
+
+    case Let(x,n,t,y,z) =>
+      if (ty == Nil) {
+        val y1 = typeCheck(y, t::Nil)(env + (x -> List(t))) // TODO: recursion?
+        val z1 = typeCheck(z, ty)(env + (x -> List(y1.tpe.head)))
+        Let(x,n,t,y1,z1) withType Nil
+      } else {
+        val y1 = typeCheck(y, t::ty.tail)(env + (x -> List(t))) // TODO: recursion?
+        val z1 = typeCheck(z, ty)(env + (x -> List(y1.tpe.head)))
+        Let(x,n,t,y1,z1) withType z1.tpe.head::comb(y1.tpe.tail, z1.tpe.tail) 
+      }
+
+    case If(c,a,b) =>
+      val c1 = typeCheck(c, Nat::ty.tail)
+      val a1 = typeCheck(a, ty)
+      val b1 = typeCheck(b, ty)
+      assert(a1.tpe == b1.tpe) // too strict?
+      If(c1,a1,b1) withType a1.tpe.head::comb(c1.tpe.tail,a1.tpe.tail)
 
     case App(f, x) => 
       if (ty == Nil) {
@@ -247,7 +265,10 @@ object Test {
     case q"($x:${t}) => $y" => 
       Lam(x.toString,1,fromScala1(t),fromScala(y))
     case q"$x + $y" => Plus(fromScala(x),fromScala(y))
+    case q"$x - $y" => Plus(fromScala(x),Times(Const(-1),fromScala(y)))
     case q"$x * $y" => Times(fromScala(x),fromScala(y))
+    case q"val $x:${t} = $y; $z" => Let(x.toString,1,fromScala1(t),fromScala(y),fromScala(z))
+    case q"if($c) $a else $b" => If(fromScala(c),fromScala(a),fromScala(b))
     case Apply(f,x::Nil) => App(fromScala(f),fromScala(x))
   }
 
@@ -264,8 +285,8 @@ object Test {
     case Const(x) => x.toString
     case Var(x) => x.toString
     case App(f,x) => s"${pretty(f)}(${prettyb(x)})"
-    case Lam(x,n,t,y) if t == Unknown => s"($x => ${prettyb(y)})"
-    case Lam(x,n,t,y) => s"($x: ${prettyb(t)} => ${prettyb(y)})"
+    case Lam(x,n,t,y) if t == Unknown => s"($x $n=> ${prettyb(y)})"
+    case Lam(x,n,t,y) => s"($x: ${prettyb(t)} $n=> ${prettyb(y)})"
     case Plus(x,y) => s"(${pretty(x)} + ${pretty(y)})"
     case Times(x,y) => s"(${pretty(x)} * ${pretty(y)})"
     case Up(x) => s"up(${prettyb(x)})"
@@ -275,12 +296,14 @@ object Test {
     case ILam(f) => s"(.. => ..)"
     case Tuple(xs) => xs map pretty mkString ","
     case Field(x,n) => s"${pretty(x)}.$n"
-    case Let(x,n,y,z) => s"val $x = ${pretty(y)}\n${pretty(z)}"
+    case Let(x,n,t,y,z) if t == Unknown => s"val $x = ${pretty(y)}\n${pretty(z)}"
+    case Let(x,n,t,y,z) => s"val $x: ${prettyb(t)} = ${pretty(y)}\n${pretty(z)}"
+    case If(c,a,b) => s"if (${pretty(c)}) ${pretty(a)} else ${pretty(b)}"
   }
 
   def prettyb(t: Term): String = t match {
-    case Lam(x,n,t,y) if t == Unknown => s"$x => ${prettyb(y)}"
-    case Lam(x,n,t,y) => s"$x: ${prettyb(t)} => ${prettyb(y)}"
+    case Lam(x,n,t,y) if t == Unknown => s"$x $n=> ${prettyb(y)}"
+    case Lam(x,n,t,y) => s"$x: ${prettyb(t)} $n=> ${prettyb(y)}"
     case Plus(x,y) => s"${pretty(x)} + ${pretty(y)}"
     case Times(x,y) => s"${pretty(x)} * ${pretty(y)}"
     case _ => pretty(t)
@@ -301,7 +324,7 @@ object Test {
   }
 
 
-  def evalStd(t: Term)(k: Any => Any)(implicit env: Map[String,Any]): Any = t match {
+  def evalStd(t: Term)(k: Any => Any)(implicit env: Map[String,Any]): Any = try t match {
     case Const(x: Int) =>       k(x)
     case Const(x: Boolean) =>   k(x)
     case Plus(x,y) =>           evalStd(x) { u => evalStd(y) { v => k(u.asInstanceOf[Int] + v.asInstanceOf[Int]) }}
@@ -320,10 +343,16 @@ object Test {
 
     case App(x,y) =>            evalStd(x) { u => evalStd(y) { v => u.asInstanceOf[Any => (Any => Any) => Any](v)(k) }}
 
-    case Let(x,n,y,z) =>        evalStd(y) { u => evalStd(z)(k)(env + (x -> u)) }
+    case Let(x0,n0,t0,Lam(x,n,t,y),z) =>        
+                                def f(x1:Any)(k1:Any => Any): Any = {
+                                  evalStd(y)(k1)(env + (x0 -> f _) + (x -> x1))
+                                }
+                                evalStd(z)(k)(env + (x0 -> f _))
+    
+    case Let(x,n,t,y,z) =>      evalStd(y) { u => evalStd(z)(k)(env + (x -> u)) }
 
     case If(c,a,b) =>
-      evalStd(c) { x => if (x.asInstanceOf[Boolean]) evalStd(a)(k) else evalStd(b)(k) }
+      evalStd(c) { x => if (x.asInstanceOf[Int] != 0) evalStd(a)(k) else evalStd(b)(k) }
   
     case Shift(x) => //shift((k: T => U) => U): T @cps[U]
       evalStd(x) { f => 
@@ -337,7 +366,7 @@ object Test {
     case Exit(x) => evalStd(x) { u => u }
 
 
-  }
+  } catch { case e => (println("error: "+pretty(t)+"    "+e)); throw e }
 
   var nNames = 0
   def fresh(s: String) = try Ident(TermName(s+nNames)) finally nNames += 1
@@ -665,6 +694,29 @@ object Test {
             app(k1, Times(u,v), vk2, vk3) }, k2, k3)}))
 
 
+    case If(c,a,b) =>
+      t.tpe.length match {
+        case 1 =>
+          ifun { k0 =>
+            app(transFullEta(c)(env), ifun { c2 =>
+              val k = proper(k0) // XXX TODO: let bind
+              val ift = fun(x => app(transFullEta(a)(env),k))
+              val iff = fun(x => app(transFullEta(b)(env),k))
+              app(If(c2, ift, iff), Const(0)) })
+          }
+      }
+
+
+    case Let(x,n,tp, y, z) =>
+      assert(y.tpe.length == 1)
+      assert(t.tpe.length == 0)
+
+      //ifun { k => 
+        Let(x,n,Unknown, 
+          app(transFullEta(y)(env + (x -> Var(x))), ifun { u => u }), 
+          transFullEta(z)(env + (x -> Var(x))) )
+
+
     case Lam(x,n,tp,y) =>
       val Fun(t1,_,ts2)::rest = t.tpe
       ts2.length match {
@@ -761,6 +813,10 @@ object Test {
 
     case Exit(x) =>             freeVars(x)
 
+    case If(c,a,b) =>           freeVars(c) ++ freeVars(a) ++ freeVars(b)
+
+    case Let(x,n,tp,y,z) =>     (freeVars(y) ++ freeVars(z)) - x
+
     case Lam(x,n,tp,y) =>       freeVars(y) - x
 
     case App(x,y) =>            freeVars(x) ++ freeVars(y)
@@ -782,19 +838,53 @@ object Test {
 
     case Exit(x) =>             lambdaLift(x)(env) { x => k(Exit(x)) }
 
+    case If(c,a,b) =>           lambdaLift(c)(env) { u => lambdaLift(a)(env) { v => lambdaLift(b)(env) { w => 
+                                  k(If(u,v,w)) }}}
+
+    case Let(f,nf,tf,Lam(x,n,tp,y),z) =>
+      val free = (freeVars(t) - f).toList
+
+      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
+
+      val ff = setN(fun((e1,x1) => lambdaLift(y)(env ++ lookup(e1) + (f -> e1) + (x -> x1))(x => x)), n)
+
+      val e1 = Tuple(free map env)
+      val cl = Tuple(ff::e1.xs)
+      
+      // ff
+
+      // lambdaLift(z)(env + (f -> Var(f)))(z => k(Let(f,nf,tf,cl,z)))
+
+      lambdaLift(z)(env + (f -> cl))(k) // let-insertion handled by app if necessary
+
+
+
     case Lam(x,n,tp,y) =>
       val free = freeVars(t).toList
-      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i))).toMap
+      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
 
       val f = setN(fun((e1,x1) => lambdaLift(y)(env ++ lookup(e1) + (x -> x1))(x => x)), n)
 
       val e1 = Tuple(free map env)
-      val cl = Tuple(List(f, e1))
+      val cl = Tuple(f::e1.xs)
       k(cl)
 
     case App(x,y) =>
       lambdaLift(x)(env) { u => lambdaLift(y)(env) { v => 
-        k(app(field(u,0),field(u,1),v)) }}
+        def istrivial(x: Term): Boolean = x match {
+          case Var(_) => true
+          case Field(x,n) => istrivial(x)
+          case _ => false
+        }
+
+        if (istrivial(u))
+          k(app(field(u,0),u,v))
+        else {
+          val u1 = freshv("cl")
+          k(Let(u1.x,0,Unknown,u,
+          app(field(u1,0),u1,v))) }}
+        }
+
 
 
   }
@@ -824,12 +914,12 @@ object Test {
         // (x => let f = (y => ...); rest) => let f = (y => ...); (x => rest)
 
         def shuffle(x: Term)(k: Term => Term): Term = x match {
-          case Lam(x1,n1,t1,Let(x2,n2,f: Lam,rest)) => Let(x2,n2,f, shuffle(Lam(x1,n1,t1,rest))(k))
+          case Lam(x1,n1,t1,Let(x2,n2,t2,f: Lam,rest)) => Let(x2,n2,t2,f, shuffle(Lam(x1,n1,t1,rest))(k))
           case _ => k(x)
         }
 
         shuffle(f) { f => 
-          Let(name,0,f, k(Var(name)))
+          Let(name,0,Unknown,f, k(Var(name)))
         }
 
       case App(x,y) =>
@@ -849,7 +939,7 @@ object Test {
       val exit = (x: Any) => return x
 
       def evalLLS(t: Term): Unit = t match {
-        case Let(x1,n1,y: Lam,z) => 
+        case Let(x1,n1,t1,y: Lam,z) => 
           fs += (x1 -> y)
           evalLLS(z)
         case App(f,x) =>
@@ -982,7 +1072,7 @@ object Test {
           }
           sp = cur
 
-          mem(sp) = start; sp += 1
+          mem(sp) = start; sp += 1*/
       }
 
       evalLLS(t)      
@@ -1003,7 +1093,7 @@ object Test {
 
     typeCheckA(If(Const(true),Exit(Const(1)), Exit(Const(0))), Void)
 
-    typeCheckA(Let("k", 1, Lam("x", 1, Nat, Exit(Var("x"))),
+    typeCheckA(Let("k", 1, Unknown, Lam("x", 1, Nat, Exit(Var("x"))),
                   App(Var("k"), Const(3))), Void)
 
 
@@ -1115,6 +1205,42 @@ object Test {
 
     }
 
+    def genMod3(t: Tree, x: Any) = {
+      nNames = 0
+      val p = fromScala(t)
+      println(pretty(p))
+      val p1 = typeCheck(p,Nil)
+      println(pretty(p1))
+
+      {nNames = 0
+      val y = transFullEta(p1)(Map())
+      println(" "+pretty(y))
+      val z = evalStd(y) { x => x}
+      println(" "+z)
+      assert(x == z)}
+
+      {nNames = 0
+      val y0 = transFullEta(p1)(Map())
+      val y = lambdaLift(y0)(Map())(x => x)
+      println(" "+pretty(y))
+      val z = evalStd(y) { x => x}
+      println(" "+z)
+      assert(x == z)}
+
+
+      // {nNames = 0
+      // val y0 = transFullEta(p1)(Map())
+      // val y1 = lambdaLift(y0)(Map())(x => x)
+      // val y = hoist(y1)(Map()) { x => x}
+      // println(" "+pretty(y))
+      // val z = evalLLP(y)
+      // println(" "+z)
+      // assert(x == z)
+      // }
+
+    }
+
+
 
 
 
@@ -1205,11 +1331,19 @@ object Test {
 
     println("--- mod2 gen ---")
 
-    genMod2(q"exit(((x:Nat) => 2 * x)(1))", 2)
+    genMod3(q"exit(((x:Nat) => 2 * x)(1))", 2)
+
+    //genMod3(q"val fac: (Nat => Nat) = n => if (n) fac(n-1) else 0; exit(fac(4))", 0)
+
+
+    genMod3(q"val fac: (Nat => Nat) = n => if (n) { n * fac(n-1) } else 1; exit(fac(4))", 24)
 
     return
 
+
+
     genMod2(q"exit(((x:Nat) => x)(1))", 1)
+
     genMod2(q"exit(reset(2))", 2)
     genMod2(q"exit(reset(shift(k => k(2))))", 2)
 
