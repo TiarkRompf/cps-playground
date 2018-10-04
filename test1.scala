@@ -352,7 +352,7 @@ object Test {
     case Let(x,n,t,y,z) =>      evalStd(y) { u => evalStd(z)(k)(env + (x -> u)) }
 
     case If(c,a,b) =>
-      evalStd(c) { x => if (x.asInstanceOf[Int] != 0) evalStd(a)(k) else evalStd(b)(k) }
+      evalStd(c) { x => if (x.asInstanceOf[Int] > 0) evalStd(a)(k) else evalStd(b)(k) }
   
     case Shift(x) => //shift((k: T => U) => U): T @cps[U]
       evalStd(x) { f => 
@@ -874,6 +874,7 @@ object Test {
         def istrivial(x: Term): Boolean = x match {
           case Var(_) => true
           case Field(x,n) => istrivial(x)
+          case Tuple(xs) => xs forall istrivial
           case _ => false
         }
 
@@ -921,6 +922,14 @@ object Test {
         shuffle(f) { f => 
           Let(name,0,Unknown,f, k(Var(name)))
         }
+
+      case Let(x,n,t,y,z) =>
+        hoist(y)(env) { u => hoist(z)(env + (x -> Var(x))) { v => 
+          Let(x,n,t,u, k(v)) }}
+
+      case If(c,a,b) =>
+        hoist(c)(env) { u => hoist(a)(env) { v => hoist(b)(env) { w => 
+          k(If(u,v,w)) }}}
 
       case App(x,y) =>
         hoist(x)(env) { u => hoist(y)(env) { v => 
@@ -1339,6 +1348,10 @@ object Test {
     genMod3(q"val fac: (Nat => Nat) = n => if (n) { n * fac(n-1) } else 1; exit(fac(4))", 24)
 
     return
+
+    genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
+
+
 
 
 
