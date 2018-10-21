@@ -612,6 +612,7 @@ object Test {
 
   def setN(f: Term, n: Int) = f match {
     case Lam(x,n0,t,y) => Lam(x,n,t,y)
+    case _ => f
   }
 
   // note: without eta in Lam case, result is identical to transN above
@@ -699,10 +700,10 @@ object Test {
         case 1 =>
           ifun { k0 =>
             app(transFullEta(c)(env), ifun { c2 =>
-              val k = proper(k0) // XXX TODO: let bind
-              val ift = fun(x => app(transFullEta(a)(env),k))
-              val iff = fun(x => app(transFullEta(b)(env),k))
-              app(If(c2, ift, iff), Const(0)) })
+              val k = setN(proper(k0), 3) // XXX TODO: let bind?
+              val ift = setN(fun(x => app(transFullEta(a)(env),k)), 3)
+              val iff = setN(fun(x => app(transFullEta(b)(env),k)), 3)
+              app(If(c2, ift, iff), Tuple(Nil)) })
           }
       }
 
@@ -809,6 +810,7 @@ object Test {
     case Var(x) =>              Set(x)
 
     case Field(x,n) =>          freeVars(x)
+    case Tuple(Nil) =>          Set()
     case Tuple(xs) =>           (xs map freeVars).reduce(_ ++ _)
 
     case Exit(x) =>             freeVars(x)
@@ -821,6 +823,12 @@ object Test {
 
     case App(x,y) =>            freeVars(x) ++ freeVars(y)
   }
+  def istrivial(x: Term): Boolean = x match {
+    case Var(_) => true
+    case Field(x,n) => istrivial(x)
+    case Tuple(xs) => xs forall istrivial
+    case _ => false
+  }
 
   def lambdaLift(t: Term)(env: Map[String,Term])(k: Term => Term): Term = t match {
     case Const(x: Int) =>       k(Const(x))
@@ -829,7 +837,7 @@ object Test {
     case Times(x,y) =>          lambdaLift(x)(env) { u => lambdaLift(y)(env) { v => k(Times(u,v)) }}
     case Var(x) =>              k(env(x))
 
-    case Field(x,n) =>          lambdaLift(x)(env) { u => k(Field(u,n)) }
+    case Field(x,n) =>          lambdaLift(x)(env) { u => k(field(u,n)) }
     case Tuple(xs) =>           def rec(xs: List[Term])(k: List[Term] => Term): Term = xs match {
                                   case Nil => k(Nil)
                                   case x::xs => lambdaLift(x)(env) { u => rec(xs) { us => k(u::us) }}
@@ -842,7 +850,7 @@ object Test {
                                   k(If(u,v,w)) }}}
 
     case Let(f,nf,tf,Lam(x,n,tp,y),z) =>
-      val free = (freeVars(t) - f).toList
+      val free = env.keys.toList //(freeVars(t) - f).toList
 
       def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
 
@@ -860,7 +868,7 @@ object Test {
 
 
     case Lam(x,n,tp,y) =>
-      val free = freeVars(t).toList
+      val free = env.keys.toList //freeVars(t).toList
       def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
 
       val f = setN(fun((e1,x1) => lambdaLift(y)(env ++ lookup(e1) + (x -> x1))(x => x)), n)
@@ -871,16 +879,11 @@ object Test {
 
     case App(x,y) =>
       lambdaLift(x)(env) { u => lambdaLift(y)(env) { v => 
-        def istrivial(x: Term): Boolean = x match {
-          case Var(_) => true
-          case Field(x,n) => istrivial(x)
-          case Tuple(xs) => xs forall istrivial
-          case _ => false
-        }
 
         if (istrivial(u))
           k(app(field(u,0),u,v))
         else {
+          // println(u + " is not trivial! ")
           val u1 = freshv("cl")
           k(Let(u1.x,0,Unknown,u,
           app(field(u1,0),u1,v))) }}
@@ -896,9 +899,10 @@ object Test {
       case Const(x: Boolean) =>   k(Const(x))
       case Plus(x,y) =>           hoist(x)(env) { u => hoist(y)(env) { v => k(Plus(u,v)) }}
       case Times(x,y) =>          hoist(x)(env) { u => hoist(y)(env) { v => k(Times(u,v)) }}
-      case Var(x) =>              k(env(x))
+      case Var(x) if env contains x =>              k(env(x))
+      case Var(x) =>              k(t)
 
-      case Field(x,n) =>          hoist(x)(env) { u => k(Field(u,n)) }
+      case Field(x,n) =>          hoist(x)(env) { u => k(field(u,n)) }
       case Tuple(xs) =>           def rec(xs: List[Term])(k: List[Term] => Term): Term = xs match {
                                     case Nil => k(Nil)
                                     case x::xs => hoist(x)(env) { u => rec(xs) { us => k(u::us) }}
@@ -924,8 +928,12 @@ object Test {
         }
 
       case Let(x,n,t,y,z) =>
-        hoist(y)(env) { u => hoist(z)(env + (x -> Var(x))) { v => 
-          Let(x,n,t,u, k(v)) }}
+        hoist(y)(env) { u => 
+          if (istrivial(u))
+            hoist(z)(env + (x -> u))(k)
+          else
+            hoist(z)(env + (x -> Var(x))) { v => 
+              Let(x,n,t,u, k(v)) }}
 
       case If(c,a,b) =>
         hoist(c)(env) { u => hoist(a)(env) { v => hoist(b)(env) { w => 
@@ -937,35 +945,180 @@ object Test {
 
     }
 
-    def evalLLP(t: Term): Any = {
-      var fs = Map[String,Term]()
+
+
+
+    def evalMLP(t: Term): Any = {
+      var fs = Map[String,Any]()
       var mem = new Array[Any](1000)
       var fp = 100 // start of stack frame
       var ap = 100
       var sp = 101
       var hp = 500
 
+      mem(99) = 1 // we use this as empty tuple (size 1 incl length)
+
       val exit = (x: Any) => return x
 
-      def evalLLS(t: Term): Unit = t match {
+      /*@scala.annotation.tailrec*/ def evalLLS(t: Term)(implicit env: Map[String,Any]): Any = t match {
+        case Let(x1,n1,t1,Lam(x2,n2,t2,y2),z) => 
+          def f(x3: Any): Any = evalLLS(y2)(env + (x1 -> f _) + (x2 -> x3))
+          evalLLS(z)(env + (x1 -> f _))
+        case App(f,x) =>
+          val f1 = evalLLE(f)
+          val x1 = evalLLE(x)
+          f1.asInstanceOf[Any => Unit](x1)
+        case Exit(x) =>
+          evalLLE(x)
+      }
+
+      def evalLLE(t: Term)(implicit env: Map[String,Any]): Any = t match {
+        case Const(x) => x
+        case Var(x) => env(x)
+
+        case Times(x,y) =>
+          evalLLE(x).asInstanceOf[Int] *
+          evalLLE(y).asInstanceOf[Int]
+          // mem(sp-2) = mem(sp-2).asInstanceOf[Int] * mem(sp-1).asInstanceOf[Int]; sp -= 1
+
+        case Plus(x,y) =>
+          evalLLE(x).asInstanceOf[Int] +
+          evalLLE(y).asInstanceOf[Int]
+
+        case If(c,a,b) =>
+          val c1 = evalLLE(c)
+          if (c1.asInstanceOf[Int] > 0)
+            evalLLE(a)
+          else
+            evalLLE(b)
+
+        case Field(x,n) =>     
+          evalLLE(x).asInstanceOf[List[Any]](n)
+
+        case Tuple(xs) =>
+          xs.map(evalLLE)
+
+        case Lam(x,n,t,y) =>
+          (x1: Any) => evalLLS(y)(env + (x -> x1))
+
+      }
+
+      evalLLS(t)(Map())
+
+    }
+
+    def evalMLP2(t: Term): Any = {
+      var fs = Map[String,Any]()
+      var mem = new Array[Any](1000)
+      var fp = 100 // start of stack frame
+      var ap = 100
+      var sp = 101
+      var hp = 500
+
+      mem(99) = 1 // we use this as empty tuple (size 1 incl length)
+
+      val exit = (x: Any) => return x
+
+      /*@scala.annotation.tailrec*/ def evalLLS(t: Term)(implicit env: Map[String,Int]): Any = t match {
+        case Let(x1,n1,t1,y,z) => 
+          val sp1 = sp; sp+=1
+          mem(sp1) = evalLLE(y)(env + (x1 -> sp1))
+          println(s"  let $x1 = ${pretty(y)}")
+          println(s"    mem($sp1) = ${mem(sp1)}")
+          evalLLS(z)(env + (x1 -> sp1))
+        case App(f,x) =>
+          val f1 = evalLLE(f)
+          val x1 = evalLLE(x)
+          mem(sp) = x1; sp += 1
+          println(s"  ${pretty(t)}")
+          f1.asInstanceOf[() => Any]()
+        case Exit(x) =>
+          evalLLE(x)
+      }
+
+      def evalLLE(t: Term)(implicit env: Map[String,Int]): Any = t match {
+        case Const(x) => x
+        case Var(x) => mem(env(x))
+
+        case Times(x,y) =>
+          evalLLE(x).asInstanceOf[Int] *
+          evalLLE(y).asInstanceOf[Int]
+          // mem(sp-2) = mem(sp-2).asInstanceOf[Int] * mem(sp-1).asInstanceOf[Int]; sp -= 1
+
+        case Plus(x,y) =>
+          evalLLE(x).asInstanceOf[Int] +
+          evalLLE(y).asInstanceOf[Int]
+
+        case If(c,a,b) =>
+          val c1 = evalLLE(c)
+          if (c1.asInstanceOf[Int] > 0)
+            evalLLE(a)
+          else
+            evalLLE(b)
+
+        case Field(x,n) =>     
+          evalLLE(x).asInstanceOf[List[Any]](n)
+
+        case Tuple(xs) =>
+          xs.map(evalLLE)
+
+        case Lam(x,n,t,y) =>
+          // assert(n != 0) // this is a continuation or a label, not a user-defined lambda!
+          val sp1 = sp
+          if (n == 0)
+            () => { 
+                        println(s"    mem(${sp-1}) = ${mem(sp-1)}")
+              evalLLS(y)(env + (x -> (sp-1))) }
+          else
+            () => { 
+              mem(sp1) = mem(sp-1); sp = sp1+1; 
+                        println(s"    mem(${sp-1}) = ${mem(sp-1)}")
+              evalLLS(y)(env + (x -> sp1)) }
+
+      }
+
+      evalLLS(t)(Map())
+
+    }
+
+
+    def evalLLP(t: Term): Any = {
+      var fs = Map[String,Any]()
+      var mem = new Array[Any](1000)
+      var fp = 100 // start of stack frame
+      var ap = 100
+      var sp = 101
+      var hp = 500
+
+      mem(99) = 1 // we use this as empty tuple (size 1 incl length)
+
+      val exit = (x: Any) => return x
+
+      @scala.annotation.tailrec def evalLLS(t: Term): Unit = t match {
         case Let(x1,n1,t1,y: Lam,z) => 
           fs += (x1 -> y)
           evalLLS(z)
+        case Let(x1,n1,t1,y,z) => 
+          evalLLE(y)
+          evalLLS(z)
         case App(f,x) =>
           println("-- "+pretty(t))
+            println(s"  fp: $fp, sp: $sp")
 
           val sp0 = sp
           evalLLE(f)
           val sp1 = sp
 
-          assert(sp1 - sp0 == 1)
+          assert(sp1 - sp0 == 1, s"$sp1 $sp0 $f") // hypothesis: allocating a closure / just extract field!
+            // println(s"fp: $fp, sp: $sp")
+            // println(mem(sp-1))
 
           val lam @ Lam(x2,n2,t2,y2) = mem(sp1-1)
 
-          println("cont call (will escape arg): "+n2)
+          // println("cont call (will escape arg): "+n2)
 
           if (n2 == 0) {
-            println("regular call. guess we just keep growing the stack?")
+            println("  regular call --> grow stack")
 
             //println("  "+mem(sp-1))
             evalLLE(x)
@@ -975,27 +1128,37 @@ object Test {
             fp = sp-1 // data is part of parent frame
             ap = sp-1
 
-          } else {
-            println("continuation call. need to reset stack, but to what? where to store result?")
-            println("arg: " + pretty(x))
+          } else if (n2 == 3) {
+            println("  local jump --> grow stack (simple)")
+            evalLLE(x)
+            //fp = sp-1 // don't adjust fp
+            ap = sp-1
 
-            println(s"fp: $fp, sp: $sp")
+          } else {
+            println("  continuation call --> reset stack")
+            // println("arg: " + pretty(x))
+
+            // println(s"fp: $fp, sp: $sp")
 
             //println("  "+mem(sp-1))
             evalLLE(x)
             val sp2 = sp
             //println("  "+mem(sp-1))
 
-            println(s"sp: $sp, arg array: ${mem.slice(sp1,sp-1).mkString(",")}")
+            // println(s"sp: $sp, arg array: ${mem.slice(sp1,sp-1).mkString(",")}")
 
             val args = mem(sp-1).asInstanceOf[Int]
-            val clos = mem(args + 0).asInstanceOf[Int]
+            val clos = mem(args + 1).asInstanceOf[Int]
 
-            val argsLen = sp-1 - sp1
-            val closLen = freeVars(lam).size // XXX TODO get len of closure block from somewhere
+            val argsLen = sp-1 - sp1; assert(argsLen == mem(args+0), s"${argsLen} != ${mem(args+0)}")
+            val closLen = mem(clos + 0).asInstanceOf[Int]
+                        //freeVars(lam).size // XXX TODO get len of closure block from somewhere
+                                             // XXX NOTE it's wrong after closure conv (always 0!)
+                                             //          because all free vars are gone!!!
+                                             // ------ FIXME FIXME FIXME
 
-            println(s"closure: mem($clos..${clos+closLen}) = ${mem.slice(clos,clos+closLen).mkString(",")}")
-            println(s"argmnts: mem($args..${args+argsLen}) = ${mem.slice(args,args+argsLen).mkString(",")} --> copy to (${clos+closLen}..${clos+closLen+argsLen})")
+            // println(s"closure: mem($clos..${clos+closLen}) = ${mem.slice(clos,clos+closLen).mkString(",")}")
+            // println(s"argmnts: mem($args..${args+argsLen}) = ${mem.slice(args,args+argsLen).mkString(",")} --> copy to (${clos+closLen}..${clos+closLen+argsLen})")
 
             // everything after closure block can be deleted -- except arguments!
             // so: copy arguments right after closure
@@ -1034,15 +1197,33 @@ object Test {
           evalLLE(y)
           mem(sp-2) = mem(sp-2).asInstanceOf[Int] + mem(sp-1).asInstanceOf[Int]; sp -= 1
 
+        case If(c,a,b) =>
+          // XXX note potentially different stack height!!!
+          val sp0 = sp
+          evalLLE(c)
+          val c1 = mem(sp-1)
+          sp = sp0
+          if (c1.asInstanceOf[Int] > 0)
+            evalLLE(a)
+          else
+            evalLLE(b)
+
         case Field(x,n) =>     
           val sp0 = sp
           evalLLE(x)
-          val tup = mem(sp-1)
-          mem(sp-1) = mem(tup.asInstanceOf[Int] + n)
-          //println("field " + mem(sp-1) + " " + n + " = " + mem(sp-1))
+          val tup = mem(sp-1).asInstanceOf[Int]
+          val elem = mem(tup.asInstanceOf[Int] + 1 + n) // +1 to skip over size
+          sp = sp0
+          mem(sp) = elem; sp += 1
+
+          elem match { case i: Int => assert(i < sp0, "overwriting nested tuple!") case _ => }
+          // NOTE: if x builds a tuple, this will overwrite it
+          // PROBLEM: if the result is a nested tuple that has been allocated by x!!!
+          // 
 
         case Tuple(Nil) =>
-          mem(sp) = 100 // first mem address
+          mem(sp) = 99 // first mem address
+          assert(mem(99) == 1) // size
           sp += 1
 
         case Tuple(xs) =>
@@ -1050,10 +1231,11 @@ object Test {
           /*
           layout:
             <internal data>
+            size = n elems + 1
             elem0
             ...
             elemn
-            ptr to elem0
+            ptr to size   <-- sp-1
           */
 
           val start = sp
@@ -1064,7 +1246,7 @@ object Test {
           }
 
           val table = sp
-
+          mem(sp) = elems.length + 1; sp+= 1
           for (e <- elems) {
             mem(sp) = e; sp+= 1
           }
@@ -1088,6 +1270,7 @@ object Test {
       mem(sp-1)
 
     }
+
 
 
 //(z0 => z1 => (z2 => z3 => (z4 => z5 => z4(z0)(z5))(z6 => z2(z6)(z3)))(z1))(1)(z7 => z8 => z8(2 * z7))(z9 => z10 => z10(1 + z9))(z11 => exit(z11))
@@ -1156,7 +1339,7 @@ object Test {
       nNames = 0
       val p = fromScala(t)
       println(pretty(p))
-      val ys = try trans0(p)(Map())//evalMod(p,0)(C0)
+      val ys = trans0(p)(Map())//evalMod(p,0)(C0)
       val y = fromScala(ys)
       println(pretty(y))
       val z = evalStd(y) { x => x}
@@ -1215,6 +1398,8 @@ object Test {
     }
 
     def genMod3(t: Tree, x: Any) = {
+      println("")
+
       nNames = 0
       val p = fromScala(t)
       println(pretty(p))
@@ -1229,12 +1414,20 @@ object Test {
       assert(x == z)}
 
       {nNames = 0
-      val y0 = transFullEta(p1)(Map())
-      val y = lambdaLift(y0)(Map())(x => x)
+      val y = transFullEta(p1)(Map())
       println(" "+pretty(y))
-      val z = evalStd(y) { x => x}
+      val z = evalMLP2(y)
       println(" "+z)
       assert(x == z)}
+
+
+      // {nNames = 0
+      // val y0 = transFullEta(p1)(Map())
+      // val y = lambdaLift(y0)(Map())(x => x)
+      // println(" "+pretty(y))
+      // val z = evalStd(y) { x => x}
+      // println(" "+z)
+      // assert(x == z)}
 
 
       // {nNames = 0
@@ -1345,11 +1538,11 @@ object Test {
     //genMod3(q"val fac: (Nat => Nat) = n => if (n) fac(n-1) else 0; exit(fac(4))", 0)
 
 
-    genMod3(q"val fac: (Nat => Nat) = n => if (n) { n * fac(n-1) } else 1; exit(fac(4))", 24)
+    genMod3(q"val fac: (Nat => Nat) = n => if (n) n * fac(n-1) else 1; exit(fac(4))", 24)
+
+    // genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
 
     return
-
-    genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
 
 
 
