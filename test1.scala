@@ -1,5 +1,7 @@
 package test1
 
+// test cases for 0,1,...,n return types (multi-level delimited continuations)
+
 object Test {
 
   abstract class Term { var tpe: EType = _ }
