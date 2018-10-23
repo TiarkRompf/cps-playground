@@ -4,6 +4,7 @@ package test2
 
 /*
 TODO: 
+  - parsing: how to distinguish 1st/2nd?
   - proper 1st/2nd type checking
   - type-preserving cps
 */
@@ -53,70 +54,74 @@ object Test {
     def withType(ty: EType) = try t finally t.tpe = ty
   }
 
-  def typeCheck1(t: Term, ty: EType)(implicit env: Map[String,Type]): Term = t match {
+  def sanitize(env: Map[String,(Int,Type)], m: Int) = env filter (_._2._1 <= m)
+
+  def typeCheck1(t: Term, m: Int, ty: EType)(implicit env: Map[String,(Int,Type)]): Term = t match {
     case Const(x: Int) =>       t withType Some(Nat)
     case Const(x: Boolean) =>   t withType Some(Bool)
-    case Var(x,n) =>            t withType Some(env(x))
+    case Var(x,0) =>            val (n1,tpe) = sanitize(env,m)(x); Var(x,n1) withType Some(tpe)
 
     case Exit(x) =>
-      val x1 = typeCheck(x, Some(Nat))
+      val x1 = typeCheck(x, 1, Some(Nat))
       Exit(x1) withType Void
 
     case Plus(a, b) =>
-      val a1 = typeCheck(a, Some(Nat))
-      val b1 = typeCheck(b, Some(Nat))
+      val a1 = typeCheck(a, 2, Some(Nat))
+      val b1 = typeCheck(b, 2, Some(Nat))
       Plus(a1, b1) withType Some(Nat)
 
     case Times(a, b) =>
-      val a1 = typeCheck(a, Some(Nat))
-      val b1 = typeCheck(b, Some(Nat))
+      val a1 = typeCheck(a, 2, Some(Nat))
+      val b1 = typeCheck(b, 2, Some(Nat))
       Times(a1, b1) withType Some(Nat)
 
     case Let(x,n,t,y,z) =>
-      val y1 = typeCheck(y, Some(t))(env + (x -> t))
-      val z1 = typeCheck(z, ty)(env + (x -> y1.tpe.get))
+      val y1 = typeCheck(y, n, Some(t))(env + (x -> (n,t)))
+      val z1 = typeCheck(z, m, ty)(env + (x -> (n,y1.tpe.get)))
       Let(x,n,t,y1,z1) withType z1.tpe
 
     case If(c,a,b) =>
-      val c1 = typeCheck(c, Some(Nat))
-      val a1 = typeCheck(a, ty)
-      val b1 = typeCheck(b, ty)
+      val c1 = typeCheck(c, 2, Some(Nat))
+      val a1 = typeCheck(a, m, ty)
+      val b1 = typeCheck(b, m, ty)
       assert(a1.tpe == b1.tpe)
       If(c1,a1,b1) withType a1.tpe
 
     case App(f, x) => 
-      val f1 = typeCheck(f, Some(Fun(Unknown,1,ty)))
+      val f1 = typeCheck(f, 2, Some(Fun(Unknown,1,ty)))
       val Some(Fun(ty1,n,ty2)) = f1.tpe
-      val x1 = typeCheck(x, Some(ty1))
+      val x1 = typeCheck(x, n, Some(ty1))
       App(f1,x1) withType ty2
 
-    case Lam(x, n, t0, y) => 
+    case Lam(x, n0, t0, y) => 
       ty match {
-        case Some(Fun(te, n, ts2)) =>
+        case Some(Fun(te, ne, ts2)) =>
+          val n1 = if (n0 == 0) ne else n0
           val t1 = if (t0 == Unknown) te else t0
+          assert(n1 != 0)
           assert(t1 != Unknown,
             s"missing parameter type!\n" +
             s"    expression: "+pretty(t) + "\n" +
             s"    expected:   "+ty.map(pretty).mkString(" / ")
           )
-          val y1 = typeCheck(y, ts2)(env + (x -> t1))
-          Lam(x, n, t1, y1) withType Some(Fun(t1, n, y1.tpe))
+          val y1 = typeCheck(y, 1, ts2)(sanitize(env,m) + (x -> (n1,t1)))
+          Lam(x, n1, t1, y1) withType Some(Fun(t1, n1, y1.tpe))
         //case _ => // error
       }
 
     case Shift(f) =>
       val Some(t1) = ty
-      val f1 = typeCheck(f, Some(Fun(Fun(t1,1,Void),1,Void)))
+      val f1 = typeCheck(f, 2, Some(Fun(Fun(t1,1,Void),1,Void)))
       val Some(Fun(Fun(t2,1,ts2),1,ts3)) = f1.tpe
       assert(typeConformsE(ts2,ts3))
       Shift(f1) withType Some(t2)
 
   }
 
-  def typeCheck(t: Term, ty: EType)(implicit env: Map[String,Type]): Term = {
+  def typeCheck(t: Term, m: Int, ty: EType)(implicit env: Map[String,(Int,Type)]): Term = {
     if (t.tpe ne null) return t
 
-    var t1 = typeCheck1(t,ty)
+    var t1 = typeCheck1(t,m,ty)
 
     def assert(b: Boolean, s: String) = if (!b) println(s)
 
@@ -160,11 +165,11 @@ object Test {
     case q"reset($x)" => Reset(fromScala(x))
     case q"shift($x)" => Shift(fromScala(x))
     case q"($x:${t}) => $y" => 
-      Lam(x.toString,1,fromScala1(t),fromScala(y))
+      Lam(x.toString,2,fromScala1(t),fromScala(y)) // default: unknown
     case q"$x + $y" => Plus(fromScala(x),fromScala(y))
     case q"$x - $y" => Plus(fromScala(x),Times(Const(-1),fromScala(y)))
     case q"$x * $y" => Times(fromScala(x),fromScala(y))
-    case q"val $x:${t} = $y; $z" => Let(x.toString,0,fromScala1(t),fromScala(y),fromScala(z))
+    case q"val $x:${t} = $y; $z" => Let(x.toString,2,fromScala1(t),fromScala(y),fromScala(z)) // default: 2nd class
     case q"if($c) $a else $b" => If(fromScala(c),fromScala(a),fromScala(b))
     case Apply(f,x::Nil) => App(fromScala(f),fromScala(x))
   }
@@ -172,7 +177,7 @@ object Test {
   def fromScala1(t: Tree): Type = t match {
     case tq"Int" => Nat
     case tq"Nat" => Nat
-    case tq"$a => $b" => Fun(fromScala1(a), 1, Some(fromScala1(b)))
+    case tq"$a => $b" => Fun(fromScala1(a), 2, Some(fromScala1(b))) // default: 2nd class
     case _ if t.toString == "Any" => Unknown
     case _ if t.toString == "<type ?>" => Unknown
   }
@@ -464,7 +469,7 @@ object Test {
       nNames = 0
       val p = fromScala(t)
       println(pretty(p))
-      val p1 = typeCheck(p,Void)(Map())
+      val p1 = typeCheck(p,1,Void)(Map())
       println(pretty(p1))
 
       {nNames = 0
