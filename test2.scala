@@ -4,9 +4,10 @@ package test2
 
 /*
 TODO: 
-  - parsing: how to distinguish 1st/2nd?
-  - proper 1st/2nd type checking
-  - type-preserving cps
+  + parsing: how to distinguish 1st/2nd? (default: all 2nd)
+  + proper 1st/2nd type checking
+  + type-preserving cps
+  - cps transform: cps arg 1st/2nd based on context
 */
 
 object Test {
@@ -15,7 +16,10 @@ object Test {
   abstract class Type
 
   case class Const(x: Any) extends Term
-  case class Var(x: String, n:Int) extends Term
+  case class Var(x: String, n:Int) extends Term {
+    var def_index: Int = -1
+    var use_index: Int = -1
+  }
   case class Lam(x: String, n: Int, t: Type, y: Term) extends Term
   case class App(f: Term, x: Term) extends Term
   case class Let(x: String, n: Int, t: Type, y: Term, z: Term) extends Term
@@ -186,6 +190,7 @@ object Test {
 
   def pretty(t: Term): String = t match {
     case Const(x) => x.toString
+    case t@Var(x,n) if t.def_index >= 0 => x.toString + "$" + (t.use_index - t.def_index)
     case Var(x,n) => x.toString
     case App(f,x) => s"${pretty(f)}(${prettyb(x)})"
     case Lam(x,n,t,y) if t == Unknown => s"($x $n=> ${prettyb(y)})"
@@ -415,6 +420,40 @@ object Test {
 
   }
 
+  def transVars(t: Term)(implicit env: (List[String],List[String])): Term = {
+    transVars1(t) withType t.tpe
+  }
+
+  def transVars1(t: Term)(implicit env: (List[String],List[String])): Term = t match {
+    case Const(x) =>       t
+    case Plus(x,y) =>      Plus(transVars(x), transVars(y))
+    case Times(x,y) =>     Times(transVars(x), transVars(y))
+    case Var(x,n) =>       val e = n match { case 1 => env._1 case 2 => env._2 }; val t1 = Var(x,n); t1.use_index = e.length; t1.def_index = e.lastIndexOf(x); t1
+
+    case Exit(x) =>        Exit(transVars(x))
+
+    case Lam(x,n,tp,y) =>
+      n match {
+        case 1 => Lam(x, n, tp, transVars(y)(env._1 :+ x, env._2))
+        case 2 => Lam(x, n, tp, transVars(y)(env._1, env._2 :+ x))
+      }
+
+    case App(x,y) =>       App(transVars(x), transVars(y))
+
+    case Let(x,n,tp, y: Lam, z) =>
+      n match {
+        case 1 => Let(x, n, tp, transVars(y)(env._1 :+ x, env._2), transVars(z)(env._1 :+ x, env._2))
+        case 2 => Let(x, n, tp, transVars(y)(env._1, env._2 :+ x), transVars(z)(env._1, env._2 :+ x))
+      }
+
+    case If(c,a,b) =>     If(transVars(c), transVars(a), transVars(b))
+
+    case Tuple(xs) =>     Tuple(xs map transVars)
+    case Field(x,n) =>    Field(transVars(x), n)
+  }
+
+
+
 
   // --------------- low-level evaluator (explicit call stack) ---------------
 
@@ -448,7 +487,7 @@ object Test {
         {
           val Clos(Lam(x,n,t,y),sp1,env) = f1
           if (n == 1) // reset sp if arg escape (continuation call!) FIXME: should decide based on type!
-            sp = sp1
+            sp = sp1  // CAVEAT: arg escape behavior seems to indicate that the var should live on the heap ...
           mem(sp) = x1; sp += 1
           println(s"    mem(${sp-1}) = ${mem(sp-1)}")
           evalLLS(y)(env + (x -> (sp-1)))
@@ -509,7 +548,8 @@ object Test {
 
       println("-- cps conversion")
       nNames = 0
-      val y = transTrivial(p1)(Map())
+      val y0 = transTrivial(p1)(Map())
+      val y = transVars(y0)(Nil,Nil)
       println(" "+pretty(y))
 
       println("-- std eval")
