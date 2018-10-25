@@ -31,9 +31,8 @@ object Test {
   case class If(c: Term, a: Term, b: Term) extends Term
   case class Plus(x: Term, y: Term) extends Term
   case class Times(x: Term, y: Term) extends Term
-  case class Reset(x: Term) extends Term
+
   case class Shift(x: Term) extends Term
-  case class Up(x: Term) extends Term
   case class Exit(x: Term) extends Term
 
   case class ILam(n: Int, t: Type, f: Term => Term) extends Term // "administrative" lambda, should inline
@@ -59,7 +58,7 @@ object Test {
   // Note on usage of 'n': 
   // 1 means first class
   // 2 means second class
-  // 0 means unknown (e.g. in typeConforms) TODO
+  // 0 means unknown (e.g. in typeConforms)
 
   // --------------- type checking ---------------
 
@@ -124,15 +123,12 @@ object Test {
       val Some(Fun(Fun(t2,1,ts2),1,ts3)) = f1.tpe
       assert(typeConformsE(ts2,ts3))
       Shift(f1) withType Some(t2)
-
   }
 
   def typeCheck(t: Term, m: Int, ty: EType)(implicit env: Map[String,(Int,Type)]): Term = {
     if (t.tpe ne null) return t
-
     var t1 = typeCheck1(t,m,ty)
-
-    def assert(b: Boolean, s: String) = if (!b) println(s)
+    def assert(b: Boolean, s: String) = if (!b) println(s) // continue on error
 
     assert(typeConformsE(t1.tpe, ty), 
       s"type error!\n" +
@@ -163,33 +159,30 @@ object Test {
   }
 
 
-
   // --------------- parsing (from Scala quasiquotes) ---------------
 
   import scala.reflect.runtime.universe.{Type => SType, _}
   def fromScala(t: Tree): Term = t match {
-    case Literal(Constant(x)) => Const(x)
-    case Ident(x) => Var(x.toString,0)
-    case q"exit($x)" => Exit(fromScala(x))
-    case q"reset($x)" => Reset(fromScala(x))
-    case q"shift($x)" => Shift(fromScala(x))
-    case q"($x:${t}) => $y" => 
-      Lam(x.toString,fromScalaN(t),fromScala1(t),fromScala(y))
-    case q"$x + $y" => Plus(fromScala(x),fromScala(y))
-    case q"$x - $y" => Plus(fromScala(x),Times(Const(-1),fromScala(y)))
-    case q"$x * $y" => Times(fromScala(x),fromScala(y))
-    case q"val $x:${t} = $y; $z" => Let(x.toString,fromScalaN(t),fromScala1(t),fromScala(y),fromScala(z))
-    case q"if($c) $a else $b" => If(fromScala(c),fromScala(a),fromScala(b))
-    case Apply(f,x::Nil) => App(fromScala(f),fromScala(x))
+    case Literal(Constant(x))    => Const(x)
+    case Ident(x)                => Var(x.toString,0)
+    case q"exit($x)"             => Exit(fromScala(x))
+    case q"shift($x)"            => Shift(fromScala(x))
+    case q"($x:${t}) => $y"      => Lam(x.toString,fromScalaN(t),fromScalaT(t),fromScala(y))
+    case q"$x + $y"              => Plus(fromScala(x),fromScala(y))
+    case q"$x - $y"              => Plus(fromScala(x),Times(Const(-1),fromScala(y)))
+    case q"$x * $y"              => Times(fromScala(x),fromScala(y))
+    case q"val $x:${t} = $y; $z" => Let(x.toString,fromScalaN(t),fromScalaT(t),fromScala(y),fromScala(z))
+    case q"if($c) $a else $b"    => If(fromScala(c),fromScala(a),fromScala(b))
+    case Apply(f,x::Nil)         => App(fromScala(f),fromScala(x))
   }
 
-  def fromScala1(t: Tree): Type = t match {
-    case tq"$a @fst" => fromScala1(a)
-    case tq"$a @snd" => fromScala1(a)
-    case tq"Int" => Nat
-    case tq"Nat" => Nat
-    case tq"$a => $b" => Fun(fromScala1(a), fromScalaN(a), Some(fromScala1(b)))
-    case _ if t.toString == "Any" => Unknown
+  def fromScalaT(t: Tree): Type = t match {
+    case tq"$a @fst"  => fromScalaT(a)
+    case tq"$a @snd"  => fromScalaT(a)
+    case tq"Int"      => Nat
+    case tq"Nat"      => Nat
+    case tq"$a => $b" => Fun(fromScalaT(a), fromScalaN(a), Some(fromScalaT(b)))
+    case _ if t.toString == "Any"      => Unknown
     case _ if t.toString == "<type ?>" => Unknown
   }
 
@@ -202,50 +195,48 @@ object Test {
   // --------------- pretty printing ---------------
 
   def pretty(t: Term): String = t match {
-    case Const(x) => x.toString
-    case t@Var(x,n) if t.def_index >= 0 => x.toString + "$" + (t.use_index - t.def_index)
-    case Var(x,n) => x.toString
-    case App(f,x) => s"${pretty(f)}(${prettyb(x)})"
-    case Lam(x,n,t,y) if t == Unknown => s"($x $n=> ${prettyb(y)})"
-    case Lam(x,n,t,y) => s"($x: ${prettyb(t)} $n=> ${prettyb(y)})"
-    case Plus(x,y) => s"(${pretty(x)} + ${pretty(y)})"
-    case Times(x,y) => s"(${pretty(x)} * ${pretty(y)})"
-    case Up(x) => s"up(${prettyb(x)})"
-    case Exit(x) => s"exit(${prettyb(x)})"
-    case Reset(x) => s"reset(${prettyb(x)})"
-    case Shift(x) => s"shift(${prettyb(x)})"
-    case ILam(n,t,f) => s"(.. => ..)"
-    case Tuple(xs) => xs map pretty mkString ","
-    case Field(x,n) => s"${pretty(x)}.$n"
+    case Const(x)       => x.toString
+    case t@Var(x,n)     if t.def_index >= 0 => x.toString + "$" + (t.use_index - t.def_index)
+    case Var(x,n)       => x.toString
+    case App(f,x)       => s"${pretty(f)}(${prettyb(x)})"
+    case Lam(x,n,t,y)   if t == Unknown => s"($x $n=> ${prettyb(y)})"
+    case Lam(x,n,t,y)   => s"($x: ${prettyb(t)} $n=> ${prettyb(y)})"
+    case Plus(x,y)      => s"(${pretty(x)} + ${pretty(y)})"
+    case Times(x,y)     => s"(${pretty(x)} * ${pretty(y)})"
+    case Exit(x)        => s"exit(${prettyb(x)})"
+    case Shift(x)       => s"shift(${prettyb(x)})"
+    case ILam(n,t,f)    => s"(.. => ..)"
+    case Tuple(xs)      => xs map pretty mkString ","
+    case Field(x,n)     => s"${pretty(x)}.$n"
     case RefTuple(n,xs) => s"[#$n "+ (xs map pretty mkString ",") + "]"
-    case RefField(x,n) => s"${pretty(x)}.$n"
+    case RefField(x,n)  => s"${pretty(x)}.$n"
     case Let(x,n,t,y,z) if t == Unknown => s"val $x $n= ${pretty(y)}\n${pretty(z)}"
     case Let(x,n,t,y,z) => s"val $x: ${prettyb(t)} $n= ${pretty(y)}\n${pretty(z)}"
-    case If(c,a,b) => s"if (${pretty(c)}) ${pretty(a)} else ${pretty(b)}"
+    case If(c,a,b)      => s"if (${pretty(c)}) ${pretty(a)} else ${pretty(b)}"
   }
 
   def prettyb(t: Term): String = t match {
     case Lam(x,n,t,y) if t == Unknown => s"$x $n=> ${prettyb(y)}"
     case Lam(x,n,t,y) => s"$x: ${prettyb(t)} $n=> ${prettyb(y)}"
-    case Plus(x,y) => s"${pretty(x)} + ${pretty(y)}"
-    case Times(x,y) => s"${pretty(x)} * ${pretty(y)}"
-    case _ => pretty(t)
+    case Plus(x,y)    => s"${pretty(x)} + ${pretty(y)}"
+    case Times(x,y)   => s"${pretty(x)} * ${pretty(y)}"
+    case _            => pretty(t)
   }
 
 
   def pretty(t: EType): String = t map pretty mkString " / "
 
   def pretty(t: Type): String = t match {
-    case Unknown => "?"
-    case Fun(a,n,b) => s"${prettyb(a)} $n=> ${pretty(b)}"
+    case Unknown     => "?"
+    case Fun(a,n,b)  => s"${prettyb(a)} $n=> ${pretty(b)}"
     case Product(as) => as.map(prettyb).mkString(" * ")
-    case _ => t.toString
+    case _           => t.toString
   }
 
   def prettyb(t: Type): String = t match {
-    case Fun(a,n,b) => s"(${prettyb(a)} $n=> ${pretty(b)})"
+    case Fun(a,n,b)  => s"(${prettyb(a)} $n=> ${pretty(b)})"
     case Product(as) => s"(${ as.map(prettyb).mkString(" * ") })"
-    case _ => pretty(t)
+    case _           => pretty(t)
   }
 
 
@@ -270,7 +261,7 @@ object Test {
     case RefField(x,n) =>       evalStd(Field(x,n))(k)
 
 
-    case Lam(x,n,t,y) =>        k((x1:Any) => (k1:Any => Any) => evalStd(y)(k1)(env + (x -> x1))) // same level!
+    case Lam(x,n,t,y) =>        k((x1:Any) => (k1:Any => Any) => evalStd(y)(k1)(env + (x -> x1)))
 
     case App(x,y) =>            evalStd(x) { u => evalStd(y) { v => u.asInstanceOf[Any => (Any => Any) => Any](v)(k) }}
 
@@ -288,11 +279,11 @@ object Test {
     case Shift(x) => //shift((k: T => U) => U): T @cps[U]
       evalStd(x) { f => 
         val f1 = f.asInstanceOf[(Any => Any) => (Any => Any) => Any]
-        f1((x:Any) => (k1:Any => Any) => k1(k(x)))(x => x) // same level!
+        f1((x:Any) => (k1:Any => Any) => k1(k(x)))(x => x)
       }
 
-    case Reset(x) => 
-      k(evalStd(x)(x => x)) // same level
+    // case Reset(x) => 
+    //  k(evalStd(x)(x => x))
 
     case Exit(x) => evalStd(x) { u => u }
 
@@ -303,8 +294,6 @@ object Test {
   // --------------- transform utils ---------------
 
   var nNames = 0
-  def fresh(s: String) = try Ident(TermName(s+nNames)) finally nNames += 1
-
   def freshv(s: String, n: Int) = try Var(s+nNames,n) finally nNames += 1
 
   def app(x: Term, y: Term) = x match {
@@ -342,17 +331,17 @@ object Test {
   }
 
 
-  def ifun(t1: Type, t2: Type)(f: (Term, Term) => Term): Term = ifun(Product(List(t1,t2)))(explode(f)_)
-  def ifun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = ifun(Product(List(t1,t2,t3)))(explode(f)_)
+  // def ifun(t1: Type, t2: Type)(f: (Term, Term) => Term): Term = ifun(Product(List(t1,t2)))(explode(f)_)
+  // def ifun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = ifun(Product(List(t1,t2,t3)))(explode(f)_)
 
 
-  def fun(t1: Type, t2: Type)(f: (Term, Term) => Term): Term = fun(Product(List(t1,t2)))(explode(f)_)
-  def fun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3)))(explode(f)_)
-  def fun(t1: Type, t2: Type, t3: Type, t4: Type)(f: (Term, Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3,t4)))(explode(f)_)
+  def fun(t1: Type, n1: Int, t2: Type, n2: Int)(f: (Term, Term) => Term): Term = fun(Product(List(t1,t2)))(explode(f)_)
+  // def fun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3)))(explode(f)_)
+  // def fun(t1: Type, t2: Type, t3: Type, t4: Type)(f: (Term, Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3,t4)))(explode(f)_)
 
   def app(f: Term, x: Term, y: Term): Term = app(f, Tuple(List(x,y)) withType Some(Product(List(x.tpe.get, y.tpe.get))))
-  def app(f: Term, x: Term, y: Term, z: Term): Term = app(f, Tuple(List(x,y,z)) withType Some(Product(List(x.tpe.get, y.tpe.get, z.tpe.get))))
-  def app(f: Term, x: Term, y: Term, z: Term, u: Term): Term = app(f, Tuple(List(x,y,z,u)) withType Some(Product(List(x.tpe.get, y.tpe.get, z.tpe.get, y.tpe.get))))
+  // def app(f: Term, x: Term, y: Term, z: Term): Term = app(f, Tuple(List(x,y,z)) withType Some(Product(List(x.tpe.get, y.tpe.get, z.tpe.get))))
+  // def app(f: Term, x: Term, y: Term, z: Term, u: Term): Term = app(f, Tuple(List(x,y,z,u)) withType Some(Product(List(x.tpe.get, y.tpe.get, z.tpe.get, y.tpe.get))))
 
   def setN(f: Term, n: Int) = f match {
     case Lam(x,n0,t,y) => assert(n0 == n); f// Lam(x,n,t,y)
@@ -397,7 +386,7 @@ object Test {
       if (ts2 == Void)
         ifun(cpsType(t.tpe.get))(k => app(k, fun(transType(tp),n)(x1 => transTrivial(y)(env + (x -> x1))))) // do not cps transform!
       else 
-        ifun(cpsType(t.tpe.get))(k => app(k, fun(transType(tp),cpsType(ts2.get))((x1,k1) => app(transTrivial(y)(env + (x -> x1)), k1)))) // FIXME: tuple 1st/2nd !!
+        ifun(cpsType(t.tpe.get))(k => app(k, fun(transType(tp),n,cpsType(ts2.get),2)((x1,k1) => app(transTrivial(y)(env + (x -> x1)), k1))))
 
     case App(x,y) =>
       if (t.tpe == Void)
@@ -407,13 +396,13 @@ object Test {
 
     case Let(x,n,tp, y: Lam, z) =>
       if (t.tpe == Void)
-        Let(x,n,transType(tp), // XXX xform type!
-          app(transTrivial(y)(env + (x -> (Var(x,n) withType Some(transType(tp))))), ifun(transType(y.tpe.get)) { u => u }), // XXX: assume this is a lambda ...
+        Let(x,n,transType(tp),
+          app(transTrivial(y)(env + (x -> (Var(x,n) withType Some(transType(tp))))), ifun(transType(y.tpe.get)) { u => u }), // id cont, we know it's a value
           transTrivial(z)(env + (x -> (Var(x,n) withType Some(transType(tp))))) ) withType Void
       else
         ifun(cpsType(t.tpe.get))(k => 
           Let(x,n,transType(tp), 
-            app(transTrivial(y)(env + (x -> Var(x,n))), ifun(transType(y.tpe.get)) { u => u }), // XXX: assume this is a lambda ...
+            app(transTrivial(y)(env + (x -> Var(x,n))), ifun(transType(y.tpe.get)) { u => u }), // id cont, we know it's a value
             app(transTrivial(z)(env + (x -> Var(x,n))), k) ) withType Void)
 
     case If(c,a,b) =>
@@ -454,8 +443,8 @@ object Test {
 
     case Exit(x) =>        Exit(transVars(x))
 
-    case Tuple(xs) =>     Tuple(xs map transVars)
-    case Field(x,n) =>    Field(transVars(x), n)
+    case Tuple(xs) =>      Tuple(xs map transVars)
+    case Field(x,n) =>     Field(transVars(x), n)
 
     case Lam(x,n,tp,y) =>
       n match {
@@ -471,36 +460,34 @@ object Test {
         case 2 => Let(x, n, tp, transVars(y)(env._1, env._2 :+ x), transVars(z)(env._1, env._2 :+ x))
       }
 
-    case If(c,a,b) =>     If(transVars(c), transVars(a), transVars(b))
+    case If(c,a,b) =>      If(transVars(c), transVars(a), transVars(b))
   }
 
 
 // --------------- closure conversion ---------------
 
+  // Note: terms remain typed throughout closure conversion, but types do not change. 
+  // So afterwards, function types can refer to both closures and raw functions (should this be changed?)
+
   def freeVars(t: Term): Set[String] = t match {
-    case Const(x) =>            Set()
-    case Plus(x,y) =>           freeVars(x) ++ freeVars(y)
-    case Times(x,y) =>          freeVars(x) ++ freeVars(y)
-    case Var(x,n) =>            Set(x)
-
-    case Field(x,n) =>          freeVars(x)
-    case Tuple(Nil) =>          Set()
-    case Tuple(xs) =>           (xs map freeVars).reduce(_ ++ _)
-
-    case Exit(x) =>             freeVars(x)
-
-    case If(c,a,b) =>           freeVars(c) ++ freeVars(a) ++ freeVars(b)
-
-    case Let(x,n,tp,y,z) =>     (freeVars(y) ++ freeVars(z)) - x
-
-    case Lam(x,n,tp,y) =>       freeVars(y) - x
-
-    case App(x,y) =>            freeVars(x) ++ freeVars(y)
+    case Const(x)        => Set()
+    case Plus(x,y)       => freeVars(x) ++ freeVars(y)
+    case Times(x,y)      => freeVars(x) ++ freeVars(y)
+    case Var(x,n)        => Set(x)
+    case Field(x,n)      => freeVars(x)
+    case Tuple(Nil)      => Set()
+    case Tuple(xs)       => (xs map freeVars).reduce(_ ++ _)
+    case Exit(x)         => freeVars(x)
+    case If(c,a,b)       => freeVars(c) ++ freeVars(a) ++ freeVars(b)
+    case Let(x,n,tp,y,z) => (freeVars(y) ++ freeVars(z)) - x
+    case Lam(x,n,tp,y)   => freeVars(y) - x
+    case App(x,y)        => freeVars(x) ++ freeVars(y)
   }
+
   def istrivial(x: Term): Boolean = x match {
-    case Var(x,n) => true
-    case Field(x,n) => istrivial(x)
-    case Tuple(xs) => xs forall istrivial
+    case Var(x,n)        => true
+    case Field(x,n)      => istrivial(x)
+    case Tuple(xs)       => xs forall istrivial
     case _ => false
   }
 
@@ -525,11 +512,10 @@ object Test {
 
       def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
 
-      val ff = fun(Product(tf::(free map (_.tpe.get))),tp) { (e1,x1) => // FIXME: use nf!!
+      val ff = fun(Product(tf::(free map (_.tpe.get))),nf,tp,n) { (e1,x1) => // XXX: 1st/2nd classification for free vars is lost (pull into tuple fields?)
         transClos(y)(env ++ lookup(e1) + (f -> e1) + (x -> x1)) }
 
-      // val e1 = Tuple(free map env)
-      val cl = RefTuple(nf, ff::(free map env)) withType Some(tf) // TPE: will be assigned function type
+      val cl = RefTuple(nf, ff::(free map env)) withType Some(tf) // Note: will be assigned function type
       
       Let(f,nf,tf,cl,transClos(z)(env + (f -> cl)))
 
@@ -537,11 +523,10 @@ object Test {
       val free = freeVars(t).toList
       def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
 
-      val f = fun(Product(t.tpe.get::(free map (_.tpe.get))),tp) { (e1,x1) => // FIXME: use nf!!
+      val f = fun(Product(t.tpe.get::(free map (_.tpe.get))),2,tp,n) { (e1,x1) =>  // XXX tuple 1st/2nd?
         transClos(y)(env ++ lookup(e1) + (x -> x1)) }
 
-      //val e1 = Tuple(free map env)
-      RefTuple(2, f::(free map env)) // TPE: will be assigned function type XXX: use m from context instead of 2!
+      RefTuple(2, f::(free map env)) // Note: will be assigned function type // TODO: use m from context!
 
     case App(x,y) =>
       val u = transClos(x)
@@ -549,18 +534,21 @@ object Test {
 
       // proper type for x:
       //   was: A -> B
-      //   now: µC. ((C,A) -> B, <env>)
+      //   now: F = (F x A -> B, E)
+      // we do not have recursive types or existentials so we keep the original type ...
 
-      def extractFun(u: Term) = 
-        RefField(u,0) withType (Some(Fun(Product(List(x.tpe.get,y.tpe.get)),0,t.tpe))) // TPE
+      val Some(Fun(a,n,b)) = u.tpe
+      val closureType = Fun(a,n,b)
+      val rawFuncType = Fun(Product(List(closureType,a)),n,b) // XXX tuple 1st/2nd?
+
+      def extractRawFunc(u: Term) = RefField(u,0) withType Some(rawFuncType)
 
       if (istrivial(u)) {
-        app(extractFun(u), u, v)
+        app(extractRawFunc(u), u, v)
       } else {
-        // println(u + " is not trivial! ")
         val u1 = (freshv("cl",2) withType u.tpe).asInstanceOf[Var]
         Let(u1.x,2,u.tpe.get,u,
-          app(extractFun(u1), u1, v))
+          app(extractRawFunc(u1), u1, v))
       }
   }
 
