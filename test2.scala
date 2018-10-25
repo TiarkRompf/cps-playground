@@ -34,6 +34,7 @@ object Test {
   case class ILam(n: Int, t: Type, f: Term => Term) extends Term // "administrative" lambda, should inline
 
   case class Tuple(xs: List[Term]) extends Term
+  case class RefTuple(n: Int, xs: List[Term]) extends Term // a by-reference tuple, allocated on the stack or heap
   case class Field(x: Term, y: Int) extends Term
 
 
@@ -203,6 +204,7 @@ object Test {
     case Shift(x) => s"shift(${prettyb(x)})"
     case ILam(n,t,f) => s"(.. => ..)"
     case Tuple(xs) => xs map pretty mkString ","
+    case RefTuple(n,xs) => s"[#$n "+ (xs map pretty mkString ",") + "]"
     case Field(x,n) => s"${pretty(x)}.$n"
     case Let(x,n,t,y,z) if t == Unknown => s"val $x $n= ${pretty(y)}\n${pretty(z)}"
     case Let(x,n,t,y,z) => s"val $x: ${prettyb(t)} $n= ${pretty(y)}\n${pretty(z)}"
@@ -248,6 +250,9 @@ object Test {
                                   case x::xs => evalStd(x) { u => rec(xs) { us => k(u::us) }}
                                 }
                                 rec(xs) { us => k(us) }
+
+    case RefTuple(n,xs) =>      evalStd(Tuple(xs))(k)
+
 
     case Field(x,n) =>          evalStd(x) { u => k(u.asInstanceOf[List[Any]](n)) }
 
@@ -295,7 +300,7 @@ object Test {
     case _ => 
       val Some(Fun(a,n,b)) = x.tpe
       val y1 = proper(y)
-      assert(y1.tpe.get == a)
+      assert(y1.tpe.get == a, s"${y1.tpe.get} != $a for term ${pretty(x)}(${pretty(y1)})")
       App(x,y1) withType b
   }
 
@@ -420,6 +425,9 @@ object Test {
 
   }
 
+
+  // --------------- variable transform (assign numeric indexes -- not strictly needed) ---------------
+
   def transVars(t: Term)(implicit env: (List[String],List[String])): Term = {
     transVars1(t) withType t.tpe
   }
@@ -431,6 +439,9 @@ object Test {
     case Var(x,n) =>       val e = n match { case 1 => env._1 case 2 => env._2 }; val t1 = Var(x,n); t1.use_index = e.length; t1.def_index = e.lastIndexOf(x); t1
 
     case Exit(x) =>        Exit(transVars(x))
+
+    case Tuple(xs) =>     Tuple(xs map transVars)
+    case Field(x,n) =>    Field(transVars(x), n)
 
     case Lam(x,n,tp,y) =>
       n match {
@@ -447,11 +458,93 @@ object Test {
       }
 
     case If(c,a,b) =>     If(transVars(c), transVars(a), transVars(b))
-
-    case Tuple(xs) =>     Tuple(xs map transVars)
-    case Field(x,n) =>    Field(transVars(x), n)
   }
 
+
+// --------------- closure conversion ---------------
+
+  def freeVars(t: Term): Set[String] = t match {
+    case Const(x) =>            Set()
+    case Plus(x,y) =>           freeVars(x) ++ freeVars(y)
+    case Times(x,y) =>          freeVars(x) ++ freeVars(y)
+    case Var(x,n) =>            Set(x)
+
+    case Field(x,n) =>          freeVars(x)
+    case Tuple(Nil) =>          Set()
+    case Tuple(xs) =>           (xs map freeVars).reduce(_ ++ _)
+
+    case Exit(x) =>             freeVars(x)
+
+    case If(c,a,b) =>           freeVars(c) ++ freeVars(a) ++ freeVars(b)
+
+    case Let(x,n,tp,y,z) =>     (freeVars(y) ++ freeVars(z)) - x
+
+    case Lam(x,n,tp,y) =>       freeVars(y) - x
+
+    case App(x,y) =>            freeVars(x) ++ freeVars(y)
+  }
+  def istrivial(x: Term): Boolean = x match {
+    case Var(x,n) => true
+    case Field(x,n) => istrivial(x)
+    case Tuple(xs) => xs forall istrivial
+    case _ => false
+  }
+
+  def transClos(t: Term)(implicit env: Map[String,Term]): Term = {
+    transClos1(t) withType t.tpe
+  }
+  def transClos1(t: Term)(implicit env: Map[String,Term]): Term = t match {
+    case Const(x) =>       t
+    case Plus(x,y) =>      Plus(transClos(x), transClos(y))
+    case Times(x,y) =>     Times(transClos(x), transClos(y))
+    case Var(x,n) =>       env(x)
+
+    case Exit(x) =>        Exit(transClos(x))
+
+    case Tuple(xs) =>      Tuple(xs map transClos)
+    case Field(x,n) =>     Field(transClos(x), n)
+
+    case If(c,a,b) =>      If(transClos(c), transClos(a), transClos(b))
+
+    case Let(f,nf,tf,Lam(x,n,tp,y),z) =>
+      val free = (freeVars(t) - f).toList
+
+      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
+
+      val ff = fun(Product(tf::(free map (_.tpe.get))),tp) { (e1,x1) => 
+        transClos(y)(env ++ lookup(e1) + (f -> e1) + (x -> x1)) }
+
+      // val e1 = Tuple(free map env)
+      val cl = RefTuple(nf, ff::(free map env)) withType Some(tf) // TPE: will be assigned function type
+      
+      Let(f,nf,tf,cl,transClos(z)(env + (f -> cl)))
+
+    case Lam(x,n,tp,y) =>
+      val free = freeVars(t).toList
+      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
+
+      val f = fun(Product(t.tpe.get::(free map (_.tpe.get))),tp) { (e1,x1) => 
+        transClos(y)(env ++ lookup(e1) + (x -> x1)) }
+
+      //val e1 = Tuple(free map env)
+      RefTuple(2, f::(free map env)) // TPE: will be assigned function type XXX: use m from context instead of 2!
+
+    case App(x,y) =>
+      val u = transClos(x)
+      val v = transClos(y)
+
+      def extractFun(u: Term) = 
+        Field(u,0) withType (Some(Fun(Product(List(x.tpe.get,y.tpe.get)),0,t.tpe))) // TPE
+
+      if (istrivial(u)) {
+        app(extractFun(u), u, v)
+      } else {
+        // println(u + " is not trivial! ")
+        val u1 = (freshv("cl",2) withType u.tpe).asInstanceOf[Var]
+        Let(u1.x,2,u.tpe.get,u,
+          app(extractFun(u1), u1, v))
+      }
+  }
 
 
 
@@ -470,6 +563,7 @@ object Test {
     val exit = (x: Any) => return x
 
     case class Clos(f: Lam, sp1: Int, e: Map[String,Int])
+    case class Addr(x: Int)
 
     /*@scala.annotation.tailrec*/ def evalLLS(t: Term)(implicit env: Map[String,Int]): Any = t match {
       case Let(x1,n1,t1,y,z) => 
@@ -516,10 +610,20 @@ object Test {
           evalLLE(b)
 
       case Field(x,n) =>     
-        evalLLE(x).asInstanceOf[List[Any]](n)
-
+        evalLLE(x) match {
+          case xs: List[Any] => xs(n)
+          case Addr(a) => mem(a + n)
+        }
       case Tuple(xs) =>
         xs.map(evalLLE)
+
+      case RefTuple(n, xs) => // XXX support 1 or 2
+        val ys = xs.map(evalLLE)
+        val a = sp
+        for (y <- ys) {
+          mem(sp) = y; sp += 1
+        }
+        Addr(a)
 
       case l@Lam(x,n,t,y) =>
         Clos(l,sp,env)
@@ -549,7 +653,12 @@ object Test {
       println("-- cps conversion")
       nNames = 0
       val y0 = transTrivial(p1)(Map())
-      val y = transVars(y0)(Nil,Nil)
+      val y1 = transVars(y0)(Nil,Nil)
+      println(" "+pretty(y1))
+
+
+      println("-- closure conversion")
+      val y = transClos(y1)(Map())
       println(" "+pretty(y))
 
       println("-- std eval")
@@ -575,12 +684,12 @@ object Test {
 
     genMod3(q"exit(((x:Nat) => 2 * x)(1))", 2)
 
-    genMod3(q"val fac: (Nat => Nat) = n => if (n) fac(n-1) else 0; exit(fac(4))", 0)
+    genMod3(q"val dec: (Nat => Nat) = n => if (n) dec(n-1) else 0; exit(dec(4))", 0)
 
 
     genMod3(q"val fac: (Nat => Nat) = n => if (n) n * fac(n-1) else 1; exit(fac(4))", 24)
 
-    genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
+    // genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
 
 
     println("DONE")
