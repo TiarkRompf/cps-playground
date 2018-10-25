@@ -13,8 +13,12 @@ TODO:
 
 object Test {
 
-  abstract class Term { var tpe: EType = _ }
-  abstract class Type
+  // --------------- terms and types ---------------
+
+  abstract class Term {
+    var tpe: EType = _
+    def withType(ty: EType): this.type = { tpe = ty; this }
+  }
 
   case class Const(x: Any) extends Term
   case class Var(x: String, n:Int) extends Term {
@@ -37,10 +41,11 @@ object Test {
   case class Tuple(xs: List[Term]) extends Term
   case class Field(x: Term, y: Int) extends Term
 
-  case class RefTuple(n: Int, xs: List[Term]) extends Term // a by-reference tuple, allocated on the stack or heap
+  case class RefTuple(n: Int, xs: List[Term]) extends Term // a by-reference tuple, allocated on the stack or heap (used for closures)
   case class RefField(x: Term, y: Int) extends Term
 
 
+  abstract class Type
   case object Unknown extends Type
   case object Unit extends Type
   case object Nat extends Type
@@ -57,10 +62,6 @@ object Test {
   // 0 means unknown (e.g. in typeConforms) TODO
 
   // --------------- type checking ---------------
-
-  implicit class foo(t: Term) {
-    def withType(ty: EType) = try t finally t.tpe = ty
-  }
 
   def sanitize(env: Map[String,(Int,Type)], m: Int) = env filter (_._2._1 <= m)
 
@@ -173,21 +174,29 @@ object Test {
     case q"reset($x)" => Reset(fromScala(x))
     case q"shift($x)" => Shift(fromScala(x))
     case q"($x:${t}) => $y" => 
-      Lam(x.toString,2,fromScala1(t),fromScala(y)) // default: unknown
+      Lam(x.toString,fromScalaN(t),fromScala1(t),fromScala(y))
     case q"$x + $y" => Plus(fromScala(x),fromScala(y))
     case q"$x - $y" => Plus(fromScala(x),Times(Const(-1),fromScala(y)))
     case q"$x * $y" => Times(fromScala(x),fromScala(y))
-    case q"val $x:${t} = $y; $z" => Let(x.toString,2,fromScala1(t),fromScala(y),fromScala(z)) // default: 2nd class
+    case q"val $x:${t} = $y; $z" => Let(x.toString,fromScalaN(t),fromScala1(t),fromScala(y),fromScala(z))
     case q"if($c) $a else $b" => If(fromScala(c),fromScala(a),fromScala(b))
     case Apply(f,x::Nil) => App(fromScala(f),fromScala(x))
   }
 
   def fromScala1(t: Tree): Type = t match {
+    case tq"$a @fst" => fromScala1(a)
+    case tq"$a @snd" => fromScala1(a)
     case tq"Int" => Nat
     case tq"Nat" => Nat
-    case tq"$a => $b" => Fun(fromScala1(a), 2, Some(fromScala1(b))) // default: 2nd class
+    case tq"$a => $b" => Fun(fromScala1(a), fromScalaN(a), Some(fromScala1(b)))
     case _ if t.toString == "Any" => Unknown
     case _ if t.toString == "<type ?>" => Unknown
+  }
+
+  def fromScalaN(t: Tree): Int = t match {
+    case tq"$a @fst" => 1
+    case tq"$a @snd" => 2
+    case tq"$a"      => 2  // default: 2nd class
   }
 
   // --------------- pretty printing ---------------
@@ -692,7 +701,7 @@ object Test {
 
     genMod3(q"exit(1+1)", 2)
 
-    // genMod3(q"exit(((x:Nat) => x)(2))", 2) // XXX 2nd -> 1st
+    // genMod3(q"exit(((x:Nat) => x)(2))", 2) // TODO: don't consider primitive types as 1st/2nd class
 
     genMod3(q"exit(((x:Nat) => 2 * x)(1))", 2)
 
