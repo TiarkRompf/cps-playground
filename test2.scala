@@ -335,7 +335,7 @@ object Test {
   // def ifun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = ifun(Product(List(t1,t2,t3)))(explode(f)_)
 
 
-  def fun(t1: Type, n1: Int, t2: Type, n2: Int)(f: (Term, Term) => Term): Term = fun(Product(List(t1,t2)))(explode(f)_)
+  def fun(t1: Type, n1: Int, t2: Type, n2: Int)(f: (Term, Term) => Term): Term = fun(Product(List(t1,t2)),n2)(explode(f)_)  // XXX tuple 1st/2nd? right now we're discarding n1 (ok if it's a closure) ...
   // def fun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3)))(explode(f)_)
   // def fun(t1: Type, t2: Type, t3: Type, t4: Type)(f: (Term, Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3,t4)))(explode(f)_)
 
@@ -464,7 +464,7 @@ object Test {
   }
 
 
-// --------------- closure conversion ---------------
+  // --------------- closure conversion ---------------
 
   // Note: terms remain typed throughout closure conversion, but types do not change. 
   // So afterwards, function types can refer to both closures and raw functions (should this be changed?)
@@ -491,21 +491,21 @@ object Test {
     case _ => false
   }
 
-  def transClos(t: Term)(implicit env: Map[String,Term]): Term = {
-    transClos1(t) withType t.tpe
+  def transClos(t: Term, m: Int)(implicit env: Map[String,Term]): Term = {
+    transClos1(t, m) withType t.tpe
   }
-  def transClos1(t: Term)(implicit env: Map[String,Term]): Term = t match {
+  def transClos1(t: Term, m: Int)(implicit env: Map[String,Term]): Term = t match {
     case Const(x) =>       t
-    case Plus(x,y) =>      Plus(transClos(x), transClos(y))
-    case Times(x,y) =>     Times(transClos(x), transClos(y))
+    case Plus(x,y) =>      Plus(transClos(x, 2), transClos(y, 2))
+    case Times(x,y) =>     Times(transClos(x, 2), transClos(y, 2))
     case Var(x,n) =>       env(x)
 
-    case Exit(x) =>        Exit(transClos(x))
+    case Exit(x) =>        Exit(transClos(x, 1))
 
-    case Tuple(xs) =>      Tuple(xs map transClos)
-    case Field(x,n) =>     Field(transClos(x), n)
+    case Tuple(xs) =>      Tuple(xs map (transClos(_, m))) // XXX type 1st/2nd?
+    case Field(x,n) =>     Field(transClos(x, 2), n)
 
-    case If(c,a,b) =>      If(transClos(c), transClos(a), transClos(b))
+    case If(c,a,b) =>      If(transClos(c, 2), transClos(a, m), transClos(b, m))
 
     case Let(f,nf,tf,Lam(x,n,tp,y),z) =>
       val free = (freeVars(t) - f).toList
@@ -513,24 +513,23 @@ object Test {
       def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
 
       val ff = fun(Product(tf::(free map (_.tpe.get))),nf,tp,n) { (e1,x1) => // XXX: 1st/2nd classification for free vars is lost (pull into tuple fields?)
-        transClos(y)(env ++ lookup(e1) + (f -> e1) + (x -> x1)) }
+        transClos(y, 1)(env ++ lookup(e1) + (f -> e1) + (x -> x1)) }
 
       val cl = RefTuple(nf, ff::(free map env)) withType Some(tf) // Note: will be assigned function type
       
-      Let(f,nf,tf,cl,transClos(z)(env + (f -> cl)))
+      Let(f,nf,tf,cl,transClos(z, m)(env + (f -> cl)))
 
     case Lam(x,n,tp,y) =>
       val free = freeVars(t).toList
       def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
 
       val f = fun(Product(t.tpe.get::(free map (_.tpe.get))),2,tp,n) { (e1,x1) =>  // XXX tuple 1st/2nd?
-        transClos(y)(env ++ lookup(e1) + (x -> x1)) }
+        transClos(y, 1)(env ++ lookup(e1) + (x -> x1)) }
 
-      RefTuple(2, f::(free map env)) // Note: will be assigned function type // TODO: use m from context!
+      RefTuple(m, f::(free map env)) // Note: will be assigned function type
 
     case App(x,y) =>
-      val u = transClos(x)
-      val v = transClos(y)
+      val u = transClos(x, 2)
 
       // proper type for x:
       //   was: A -> B
@@ -542,6 +541,8 @@ object Test {
       val rawFuncType = Fun(Product(List(closureType,a)),n,b) // XXX tuple 1st/2nd?
 
       def extractRawFunc(u: Term) = RefField(u,0) withType Some(rawFuncType)
+
+      val v = transClos(y, n)
 
       if (istrivial(u)) {
         app(extractRawFunc(u), u, v)
@@ -555,6 +556,8 @@ object Test {
 
 
   // --------------- low-level evaluator (explicit call stack) ---------------
+
+  // Note: this was implemented before closure conversion, could go more low-level now
 
   def evalLLP(t: Term): Any = {
     var fs = Map[String,Any]()
@@ -586,8 +589,15 @@ object Test {
 
         {
           val Clos(Lam(x,n,t,y),sp1,env) = f1
-          if (n == 1) // reset sp if arg escape (continuation call!) FIXME: should decide based on type!
-            sp = sp1  // CAVEAT: arg escape behavior seems to indicate that the var should live on the heap ...
+          // reset sp if arg escape (continuation call!) FIXME: should decide based on type!
+          // CAVEAT: arg escape behavior seems to indicate that the var should live on the heap ... we avoid this by more precise closure conversion
+          if (n == 1) { 
+            val List(Addr(clos),arg) = x1
+            val closSize = mem(clos).asInstanceOf[Int]
+            println(s"*** JMP/RET $sp $sp1 $clos+$closSize ***")
+            assert(sp1 == clos)
+            sp = sp1 //+ closSize FIXME: likely something wrong here -- we should need to add closSize but this crashes
+          }
           mem(sp) = x1; sp += 1
           println(s"    mem(${sp-1}) = ${mem(sp-1)}")
           evalLLS(y)(env + (x -> (sp-1)))
@@ -622,9 +632,19 @@ object Test {
         val xs = evalLLE(x).asInstanceOf[List[Any]]
         xs(n)
 
-      case RefTuple(n, xs) => // XXX support 1 or 2
+      case RefTuple(1, xs) => // heap
+        val ys = xs.map(evalLLE)
+        val a = hp
+        mem(hp) = ys.length; hp += 1
+        for (y <- ys) {
+          mem(hp) = y; hp += 1
+        }
+        Addr(a)
+
+      case RefTuple(2, xs) => // stack
         val ys = xs.map(evalLLE)
         val a = sp
+        mem(sp) = ys.length; sp += 1
         for (y <- ys) {
           mem(sp) = y; sp += 1
         }
@@ -632,7 +652,7 @@ object Test {
 
       case RefField(x,n) =>
         val Addr(a) = evalLLE(x)
-        mem(a + n)
+        mem(a + 1 + n)
 
       case l@Lam(x,n,t,y) =>
         Clos(l,sp,env)
@@ -667,7 +687,7 @@ object Test {
 
 
       println("-- closure conversion")
-      val y = transClos(y1)(Map())
+      val y = transClos(y1,1)(Map())
       println(" "+pretty(y))
 
       println("-- std eval")
