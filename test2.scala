@@ -8,6 +8,7 @@ TODO:
   + proper 1st/2nd type checking
   + type-preserving cps
   - cps transform: cps arg 1st/2nd based on context
+  - 1st/2nd class for tuple fields
 */
 
 object Test {
@@ -34,8 +35,10 @@ object Test {
   case class ILam(n: Int, t: Type, f: Term => Term) extends Term // "administrative" lambda, should inline
 
   case class Tuple(xs: List[Term]) extends Term
-  case class RefTuple(n: Int, xs: List[Term]) extends Term // a by-reference tuple, allocated on the stack or heap
   case class Field(x: Term, y: Int) extends Term
+
+  case class RefTuple(n: Int, xs: List[Term]) extends Term // a by-reference tuple, allocated on the stack or heap
+  case class RefField(x: Term, y: Int) extends Term
 
 
   case object Unknown extends Type
@@ -204,8 +207,9 @@ object Test {
     case Shift(x) => s"shift(${prettyb(x)})"
     case ILam(n,t,f) => s"(.. => ..)"
     case Tuple(xs) => xs map pretty mkString ","
-    case RefTuple(n,xs) => s"[#$n "+ (xs map pretty mkString ",") + "]"
     case Field(x,n) => s"${pretty(x)}.$n"
+    case RefTuple(n,xs) => s"[#$n "+ (xs map pretty mkString ",") + "]"
+    case RefField(x,n) => s"${pretty(x)}.$n"
     case Let(x,n,t,y,z) if t == Unknown => s"val $x $n= ${pretty(y)}\n${pretty(z)}"
     case Let(x,n,t,y,z) => s"val $x: ${prettyb(t)} $n= ${pretty(y)}\n${pretty(z)}"
     case If(c,a,b) => s"if (${pretty(c)}) ${pretty(a)} else ${pretty(b)}"
@@ -251,10 +255,11 @@ object Test {
                                 }
                                 rec(xs) { us => k(us) }
 
-    case RefTuple(n,xs) =>      evalStd(Tuple(xs))(k)
-
-
     case Field(x,n) =>          evalStd(x) { u => k(u.asInstanceOf[List[Any]](n)) }
+
+    case RefTuple(n,xs) =>      evalStd(Tuple(xs))(k)
+    case RefField(x,n) =>       evalStd(Field(x,n))(k)
+
 
     case Lam(x,n,t,y) =>        k((x1:Any) => (k1:Any => Any) => evalStd(y)(k1)(env + (x -> x1))) // same level!
 
@@ -509,9 +514,9 @@ object Test {
     case Let(f,nf,tf,Lam(x,n,tp,y),z) =>
       val free = (freeVars(t) - f).toList
 
-      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
+      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
 
-      val ff = fun(Product(tf::(free map (_.tpe.get))),tp) { (e1,x1) => 
+      val ff = fun(Product(tf::(free map (_.tpe.get))),tp) { (e1,x1) => // FIXME: use nf!!
         transClos(y)(env ++ lookup(e1) + (f -> e1) + (x -> x1)) }
 
       // val e1 = Tuple(free map env)
@@ -521,9 +526,9 @@ object Test {
 
     case Lam(x,n,tp,y) =>
       val free = freeVars(t).toList
-      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, field(e1,i+1))).toMap
+      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
 
-      val f = fun(Product(t.tpe.get::(free map (_.tpe.get))),tp) { (e1,x1) => 
+      val f = fun(Product(t.tpe.get::(free map (_.tpe.get))),tp) { (e1,x1) => // FIXME: use nf!!
         transClos(y)(env ++ lookup(e1) + (x -> x1)) }
 
       //val e1 = Tuple(free map env)
@@ -533,8 +538,12 @@ object Test {
       val u = transClos(x)
       val v = transClos(y)
 
+      // proper type for x:
+      //   was: A -> B
+      //   now: µC. ((C,A) -> B, <env>)
+
       def extractFun(u: Term) = 
-        Field(u,0) withType (Some(Fun(Product(List(x.tpe.get,y.tpe.get)),0,t.tpe))) // TPE
+        RefField(u,0) withType (Some(Fun(Product(List(x.tpe.get,y.tpe.get)),0,t.tpe))) // TPE
 
       if (istrivial(u)) {
         app(extractFun(u), u, v)
@@ -609,13 +618,12 @@ object Test {
         else
           evalLLE(b)
 
-      case Field(x,n) =>     
-        evalLLE(x) match {
-          case xs: List[Any] => xs(n)
-          case Addr(a) => mem(a + n)
-        }
       case Tuple(xs) =>
         xs.map(evalLLE)
+
+      case Field(x,n) =>
+        val xs = evalLLE(x).asInstanceOf[List[Any]]
+        xs(n)
 
       case RefTuple(n, xs) => // XXX support 1 or 2
         val ys = xs.map(evalLLE)
@@ -624,6 +632,10 @@ object Test {
           mem(sp) = y; sp += 1
         }
         Addr(a)
+
+      case RefField(x,n) =>
+        val Addr(a) = evalLLE(x)
+        mem(a + n)
 
       case l@Lam(x,n,t,y) =>
         Clos(l,sp,env)
@@ -685,7 +697,6 @@ object Test {
     genMod3(q"exit(((x:Nat) => 2 * x)(1))", 2)
 
     genMod3(q"val dec: (Nat => Nat) = n => if (n) dec(n-1) else 0; exit(dec(4))", 0)
-
 
     genMod3(q"val fac: (Nat => Nat) = n => if (n) n * fac(n-1) else 1; exit(fac(4))", 24)
 
