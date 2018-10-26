@@ -571,7 +571,7 @@ object Test {
 
     val exit = (x: Any) => return x
 
-    case class Clos(f: Lam, sp1: Int, e: Map[String,Int])
+    case class Clos(f: Lam, sp1: Int)
     case class Addr(x: Int)
 
     /*@scala.annotation.tailrec*/ def evalLLS(t: Term)(implicit env: Map[String,Int]): Any = t match {
@@ -585,22 +585,23 @@ object Test {
         val f1 = evalLLE(f)
         val x1 = evalLLE(x)
         println(s"  ${pretty(t)}")
-        //f1.asInstanceOf[() => Any]()
 
         {
-          val Clos(Lam(x,n,t,y),sp1,env) = f1
-          // reset sp if arg escape (continuation call!) FIXME: should decide based on type!
-          // CAVEAT: arg escape behavior seems to indicate that the var should live on the heap ... we avoid this by more precise closure conversion
+          val Clos(Lam(x,n,t,y), sp1) = f1
+          // reset sp if arg escape (continuation call!) TODO: should decide based on type?
+          // (escape behavior seems to indicate that the arg should live on the heap ... but this would
+          // be expensive for continuations! we avoid this by more precise closure conversion. arguments
+          // are always passed on the stack but copied into heap-allocated closures if necessary)
           if (n == 1) { 
             val List(Addr(clos),arg) = x1
+            assert(sp1 == clos) // TODO: we assume here that closure is stack allocated (2nd class!). may not be true ...
             val closSize = mem(clos).asInstanceOf[Int]
-            println(s"*** JMP/RET $sp $sp1 $clos+$closSize ***")
-            assert(sp1 == clos)
-            sp = clos + closSize + 1 //FIXME: likely something wrong here -- we should need to add closSize but this crashes
+            println(s"*** JMP/RET reset sp $sp -> $clos+${closSize+1} ***")
+            sp = clos + closSize + 1
           }
           mem(sp) = x1; sp += 1
           println(s"    mem(${sp-1}) = ${mem(sp-1)}")
-          evalLLS(y)(env + (x -> (sp-1)))
+          evalLLS(y)(Map(x -> (sp-1)))
         }
       case Exit(x) =>
         evalLLE(x)
@@ -655,7 +656,7 @@ object Test {
         mem(a + 1 + n)
 
       case l@Lam(x,n,t,y) =>
-        Clos(l,sp,env)
+        Clos(l,sp)
     }
 
     evalLLS(t)(Map())
@@ -717,7 +718,7 @@ object Test {
 
     genMod3(q"val fac: (Nat => Nat) = n => if (n) n * fac(n-1) else 1; exit(fac(4))", 24)
 
-    // genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
+    genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
 
 
     println("DONE")
