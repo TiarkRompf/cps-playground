@@ -596,7 +596,7 @@ object Test {
             val closSize = mem(clos).asInstanceOf[Int]
             println(s"*** JMP/RET $sp $sp1 $clos+$closSize ***")
             assert(sp1 == clos)
-            sp = sp1 //+ closSize FIXME: likely something wrong here -- we should need to add closSize but this crashes
+            sp = clos + closSize + 1 //FIXME: likely something wrong here -- we should need to add closSize but this crashes
           }
           mem(sp) = x1; sp += 1
           println(s"    mem(${sp-1}) = ${mem(sp-1)}")
