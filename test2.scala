@@ -369,64 +369,64 @@ object Test {
   def cpsType(t: Type) = Fun(transType(t),1,Void)
 
 
-  def transTrivial(t: Term)(env: Map[String,Term]): Term = {
-    val t1 = transTrivial1(t)(env)
+  def transCPS(t: Term)(env: Map[String,Term]): Term = {
+    val t1 = transCPS1(t)(env)
     assert(t1.tpe == transType(t.tpe), s"${t1.tpe} != ${transType(t.tpe)}\n for term [[ $t ]] = $t1")
     t1
   }
 
 
-  def transTrivial1(t: Term)(env: Map[String,Term]): Term = t match {
+  def transCPS1(t: Term)(env: Map[String,Term]): Term = t match {
     case Const(x: Int) =>       ifun(cpsType(Nat))(k => app(k, (Const(x) withType Some(Nat))))
     case Const(x: Boolean) =>   ifun(cpsType(Nat))(k => app(k, (Const(x) withType Some(Bool))))
-    case Plus(x,y) =>           ifun(cpsType(Nat))(k => app(transTrivial(x)(env), ifun(Nat) { u => app(transTrivial(y)(env), ifun(Nat) { v => app(k, Plus(u,v) withType Some(Nat)) })}))
-    case Times(x,y) =>          ifun(cpsType(Nat))(k => app(transTrivial(x)(env), ifun(Nat) { u => app(transTrivial(y)(env), ifun(Nat) { v => app(k, Times(u,v) withType Some(Nat)) })}))
+    case Plus(x,y) =>           ifun(cpsType(Nat))(k => app(transCPS(x)(env), ifun(Nat) { u => app(transCPS(y)(env), ifun(Nat) { v => app(k, Plus(u,v) withType Some(Nat)) })}))
+    case Times(x,y) =>          ifun(cpsType(Nat))(k => app(transCPS(x)(env), ifun(Nat) { u => app(transCPS(y)(env), ifun(Nat) { v => app(k, Times(u,v) withType Some(Nat)) })}))
     case Var(x,n) =>            ifun(cpsType(t.tpe.get))(k => app(k, (env(x))))
 
-    case Exit(x) =>             app(transTrivial(x)(env), ifun(transType(x.tpe.get))(x => Exit(x) withType Void))
+    case Exit(x) =>             app(transCPS(x)(env), ifun(transType(x.tpe.get))(x => Exit(x) withType Void))
 
     case Lam(x,n,tp,y) =>
       val Some(Fun(t1,n1,ts2)) = t.tpe; assert(tp == t1 && n == n1)
       if (ts2 == Void)
-        ifun(cpsType(t.tpe.get))(k => app(k, fun(transType(tp),n)(x1 => transTrivial(y)(env + (x -> x1))))) // do not cps transform!
+        ifun(cpsType(t.tpe.get))(k => app(k, fun(transType(tp),n)(x1 => transCPS(y)(env + (x -> x1))))) // do not cps transform!
       else 
-        ifun(cpsType(t.tpe.get))(k => app(k, fun(transType(tp),n,cpsType(ts2.get),2)((x1,k1) => app(transTrivial(y)(env + (x -> x1)), k1))))
+        ifun(cpsType(t.tpe.get))(k => app(k, fun(transType(tp),n,cpsType(ts2.get),2)((x1,k1) => app(transCPS(y)(env + (x -> x1)), k1))))
 
     case App(x,y) =>
       if (t.tpe == Void)
-        app(transTrivial(x)(env), ifun(transType(x.tpe.get)) { u => app(transTrivial(y)(env), ifun(y.tpe.get) { v => app(u,v) })})
+        app(transCPS(x)(env), ifun(transType(x.tpe.get)) { u => app(transCPS(y)(env), ifun(y.tpe.get) { v => app(u,v) })})
       else
-        ifun(cpsType(t.tpe.get))(k => app(transTrivial(x)(env), ifun(transType(x.tpe.get)) { u => app(transTrivial(y)(env), ifun(transType(y.tpe.get)) { v => app(u,v,k) })}))
+        ifun(cpsType(t.tpe.get))(k => app(transCPS(x)(env), ifun(transType(x.tpe.get)) { u => app(transCPS(y)(env), ifun(transType(y.tpe.get)) { v => app(u,v,k) })}))
 
     case Let(x,n,tp, y: Lam, z) =>
       if (t.tpe == Void)
         Let(x,n,transType(tp),
-          app(transTrivial(y)(env + (x -> (Var(x,n) withType Some(transType(tp))))), ifun(transType(y.tpe.get)) { u => u }), // id cont, we know it's a value
-          transTrivial(z)(env + (x -> (Var(x,n) withType Some(transType(tp))))) ) withType Void
+          app(transCPS(y)(env + (x -> (Var(x,n) withType Some(transType(tp))))), ifun(transType(y.tpe.get)) { u => u }), // id cont, we know it's a value
+          transCPS(z)(env + (x -> (Var(x,n) withType Some(transType(tp))))) ) withType Void
       else
         ifun(cpsType(t.tpe.get))(k => 
           Let(x,n,transType(tp), 
-            app(transTrivial(y)(env + (x -> Var(x,n))), ifun(transType(y.tpe.get)) { u => u }), // id cont, we know it's a value
-            app(transTrivial(z)(env + (x -> Var(x,n))), k) ) withType Void)
+            app(transCPS(y)(env + (x -> Var(x,n))), ifun(transType(y.tpe.get)) { u => u }), // id cont, we know it's a value
+            app(transCPS(z)(env + (x -> Var(x,n))), k) ) withType Void)
 
     case If(c,a,b) =>
       if (t.tpe == Void) 
-        app(transTrivial(c)(env), ifun(transType(c.tpe.get)) { c2 =>
-          val ift = fun(Product(Nil),1)(x => transTrivial(a)(env))
-          val iff = fun(Product(Nil),1)(x => transTrivial(b)(env))
+        app(transCPS(c)(env), ifun(transType(c.tpe.get)) { c2 =>
+          val ift = fun(Product(Nil),1)(x => transCPS(a)(env))
+          val iff = fun(Product(Nil),1)(x => transCPS(b)(env))
           app(If(c2, ift, iff) withType ift.tpe, Tuple(Nil) withType Some(Product(Nil))) }) withType Void
       else
         ifun(cpsType(t.tpe.get)) { k0 =>
-          app(transTrivial(c)(env), ifun(transType(c.tpe.get)) { c2 =>
+          app(transCPS(c)(env), ifun(transType(c.tpe.get)) { c2 =>
             val k = proper(k0) // XXX TODO: let bind?
-            val ift = fun(Product(Nil),1)(x => app(transTrivial(a)(env),k))
-            val iff = fun(Product(Nil),1)(x => app(transTrivial(b)(env),k))
+            val ift = fun(Product(Nil),1)(x => app(transCPS(a)(env),k))
+            val iff = fun(Product(Nil),1)(x => app(transCPS(b)(env),k))
             app(If(c2, ift, iff) withType ift.tpe, Tuple(Nil) withType Some(Product(Nil))) })
         }
 
     case Shift(f) =>
       ifun(cpsType(t.tpe.get))(k => 
-        app(transTrivial(f)(env), ifun(f.tpe.get) { f1 => 
+        app(transCPS(f)(env), ifun(f.tpe.get) { f1 => 
           app(f1, k)
       }))
 
@@ -690,7 +690,7 @@ object Test {
 
       println("-- cps conversion")
       nNames = 0
-      val y0 = transTrivial(p1)(Map())
+      val y0 = transCPS(p1)(Map())
       val y1 = transVars(y0)(Nil,Nil)
       println(" "+pretty(y1))
 
