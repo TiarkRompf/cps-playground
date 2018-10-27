@@ -119,7 +119,7 @@ object Test {
 
     case Shift(f) =>
       val Some(t1) = ty
-      val f1 = typeCheck(f, 2, Some(Fun(Fun(t1,1,Void),1,Void)))
+      val f1 = typeCheck(f, 2, Some(Fun(Fun(t1,1,Void),2,Void))) // NOTE: replacing 1 with m would be more precise (but then we should perform CPS with m from context, too, which we may need anyways)
       val Some(Fun(Fun(t2,1,ts2),1,ts3)) = f1.tpe
       assert(typeConformsE(ts2,ts3))
       Shift(f1) withType Some(t2)
