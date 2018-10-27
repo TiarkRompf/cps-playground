@@ -7,8 +7,10 @@ TODO:
   + parsing: how to distinguish 1st/2nd? (default: all 2nd)
   + proper 1st/2nd type checking
   + type-preserving cps
-  - cps transform: cps arg 1st/2nd based on context
   - 1st/2nd class for tuple fields
+  - cps transform: cps arg 1st/2nd based on context
+
+  - type check transformed terms again
 */
 
 object Test {
@@ -50,7 +52,7 @@ object Test {
   case object Nat extends Type
   case object Bool extends Type
   case class Fun(x: Type, n: Int, y: EType) extends Type
-  case class Product(xs: List[Type]) extends Type
+  case class Product(xs: List[(Int,Type)]) extends Type
 
   type EType = Option[Type] // None = doesn't return
   val Void = None
@@ -229,13 +231,13 @@ object Test {
   def pretty(t: Type): String = t match {
     case Unknown     => "?"
     case Fun(a,n,b)  => s"${prettyb(a)} $n=> ${pretty(b)}"
-    case Product(as) => as.map(prettyb).mkString(" * ")
+    case Product(as) => as.map({ case (n,t) => prettyb(t)+"^"+n}).mkString(" * ")
     case _           => t.toString
   }
 
   def prettyb(t: Type): String = t match {
     case Fun(a,n,b)  => s"(${prettyb(a)} $n=> ${pretty(b)})"
-    case Product(as) => s"(${ as.map(prettyb).mkString(" * ") })"
+    case Product(as) => s"(${ as.map({ case (n,t) => prettyb(t)+"^"+n}).mkString(" * ") })"
     case _           => pretty(t)
   }
 
@@ -317,7 +319,7 @@ object Test {
 
   def field(x: Term, n: Int): Term = x match {
     case Tuple(xs) => xs(n)
-    case _ => Field(x,n) withType Some(x.tpe.get.asInstanceOf[Product].xs(n))
+    case _ => Field(x,n) withType Some(x.tpe.get.asInstanceOf[Product].xs(n)._2)
   }
 
   def explode(f: (Term, Term) => Term)(x: Term): Term = f(field(x,0),field(x,1))
@@ -335,11 +337,14 @@ object Test {
   // def ifun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = ifun(Product(List(t1,t2,t3)))(explode(f)_)
 
 
-  def fun(t1: Type, n1: Int, t2: Type, n2: Int)(f: (Term, Term) => Term): Term = fun(Product(List(t1,t2)),n2)(explode(f)_)  // XXX tuple 1st/2nd? right now we're discarding n1 (ok if it's a closure) ...
+  def fun(t1: Type, n1: Int, t2: Type, n2: Int)(f: (Term, Term) => Term): Term = fun(Product(List((n1,t1),(n2,t2))),2)(explode(f)_)  // XXX tuple 1st/2nd? right now we're discarding n1 (ok if it's a closure) ...
   // def fun(t1: Type, t2: Type, t3: Type)(f: (Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3)))(explode(f)_)
   // def fun(t1: Type, t2: Type, t3: Type, t4: Type)(f: (Term, Term, Term, Term) => Term): Term = fun(Product(List(t1,t2,t3,t4)))(explode(f)_)
 
-  def app(f: Term, x: Term, y: Term): Term = app(f, Tuple(List(x,y)) withType Some(Product(List(x.tpe.get, y.tpe.get))))
+  def app(f: Term, x: Term, y: Term): Term = {
+    val Some(Fun(Product(List((n1,a1),(n2,a2))),_,_)) = f.tpe
+    app(f, Tuple(List(x,y)) withType Some(Product(List((n1,x.tpe.get), (n2,y.tpe.get)))))
+  }
   // def app(f: Term, x: Term, y: Term, z: Term): Term = app(f, Tuple(List(x,y,z)) withType Some(Product(List(x.tpe.get, y.tpe.get, z.tpe.get))))
   // def app(f: Term, x: Term, y: Term, z: Term, u: Term): Term = app(f, Tuple(List(x,y,z,u)) withType Some(Product(List(x.tpe.get, y.tpe.get, z.tpe.get, y.tpe.get))))
 
@@ -358,8 +363,8 @@ object Test {
     case Nat => Nat
     case Bool => Bool
     case Fun(a,n,None) => Fun(transType(a),n,None)
-    case Fun(a,n,Some(b)) => Fun(Product(List(transType(a),cpsType(b))),n,Void)
-    case Product(xs) => Product(xs map transType)
+    case Fun(a,n,Some(b)) => Fun(Product(List((n,transType(a)),(2,cpsType(b)))),2,Void)
+    case Product(xs) => Product(xs map { case (n,t) => (n,transType(t)) })
   }
 
   def cpsType(t: Type) = Fun(transType(t),1,Void)
@@ -491,14 +496,14 @@ object Test {
     case _ => false
   }
 
-  def transClos(t: Term, m: Int)(implicit env: Map[String,Term]): Term = {
+  def transClos(t: Term, m: Int)(implicit env: Map[String,(Int,Term)]): Term = {
     transClos1(t, m) withType t.tpe
   }
-  def transClos1(t: Term, m: Int)(implicit env: Map[String,Term]): Term = t match {
+  def transClos1(t: Term, m: Int)(implicit env: Map[String,(Int,Term)]): Term = t match {
     case Const(x) =>       t
     case Plus(x,y) =>      Plus(transClos(x, 2), transClos(y, 2))
     case Times(x,y) =>     Times(transClos(x, 2), transClos(y, 2))
-    case Var(x,n) =>       env(x)
+    case Var(x,n) =>       env(x)._2
 
     case Exit(x) =>        Exit(transClos(x, 1))
 
@@ -509,24 +514,25 @@ object Test {
 
     case Let(f,nf,tf,Lam(x,n,tp,y),z) =>
       val free = (freeVars(t) - f).toList
+      def lookup(e1: Term): Map[String,(Int,Term)] = (for ((x,i) <- free.zipWithIndex) yield (x,(env(x)._1, RefField(e1,i+1)))).toMap
+      val closureType = Product((nf,tf)::(free map env map (p => (p._1,p._2.tpe.get))))
 
-      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
+      val ff = fun(closureType,nf,tp,n) { (e1,x1) => 
+        transClos(y, 1)(env ++ lookup(e1) + (f -> (nf,e1)) + (x -> (n,x1))) }
 
-      val ff = fun(Product(tf::(free map (_.tpe.get))),nf,tp,n) { (e1,x1) => // XXX: 1st/2nd classification for free vars is lost (pull into tuple fields?)
-        transClos(y, 1)(env ++ lookup(e1) + (f -> e1) + (x -> x1)) }
-
-      val cl = RefTuple(nf, ff::(free map env)) withType Some(tf) // Note: will be assigned function type
+      val cl = RefTuple(nf, ff::(free map env map (_._2))) withType Some(tf) // Note: will be assigned function type
       
-      Let(f,nf,tf,cl,transClos(z, m)(env + (f -> cl)))
+      Let(f,nf,tf,cl,transClos(z, m)(env + (f -> (nf,cl))))
 
     case Lam(x,n,tp,y) =>
       val free = freeVars(t).toList
-      def lookup(e1: Term): Map[String,Term] = (for ((x,i) <- free.zipWithIndex) yield (x, RefField(e1,i+1))).toMap
+      def lookup(e1: Term): Map[String,(Int,Term)] = (for ((x,i) <- free.zipWithIndex) yield (x,(env(x)._1, RefField(e1,i+1)))).toMap
+      val closureType = Product((2,t.tpe.get)::(free map env map (p => (p._1,p._2.tpe.get))))
 
-      val f = fun(Product(t.tpe.get::(free map (_.tpe.get))),2,tp,n) { (e1,x1) =>  // XXX tuple 1st/2nd?
-        transClos(y, 1)(env ++ lookup(e1) + (x -> x1)) }
+      val f = fun(closureType,2,tp,n) { (e1,x1) => 
+        transClos(y, 1)(env ++ lookup(e1) + (x -> (n,x1))) }
 
-      RefTuple(m, f::(free map env)) // Note: will be assigned function type
+      RefTuple(m, f::(free map env map (_._2))) // Note: will be assigned function type
 
     case App(x,y) =>
       val u = transClos(x, 2)
@@ -538,7 +544,9 @@ object Test {
 
       val Some(Fun(a,n,b)) = u.tpe
       val closureType = Fun(a,n,b)
-      val rawFuncType = Fun(Product(List(closureType,a)),n,b) // XXX tuple 1st/2nd?
+      val rawFuncType = Fun(Product(List((2,closureType),(n,a))),2,b) // note: we assume closure is 2nd class here, 
+      // although some functions may leak it --- this is fine because it will have been known to be 1st class and 
+      // therefore heap-allocated at the function creation site (it must have been demoted to 2nd class in present context)
 
       def extractRawFunc(u: Term) = RefField(u,0) withType Some(rawFuncType)
 
@@ -587,12 +595,13 @@ object Test {
         println(s"  ${pretty(t)}")
 
         {
-          val Clos(Lam(x,n,t,y), sp1) = f1
+          val Clos(l1@Lam(x,n,t,y), sp1) = f1
           // reset sp if arg escape (continuation call!) TODO: should decide based on type?
           // (escape behavior seems to indicate that the arg should live on the heap ... but this would
           // be expensive for continuations! we avoid this by more precise closure conversion. arguments
           // are always passed on the stack but copied into heap-allocated closures if necessary)
-          if (n == 1) { 
+          val clos::args = f.tpe match { case Some(Fun(Product(xs),2,_)) => xs case Some(Fun(a,n,_)) => List((n,a)) }
+          if (args.forall(_._1 == 1)) { // if all args (except closure) are 1st class, we can shrink stack
             val List(Addr(clos),arg) = x1
             assert(sp1 == clos) // TODO: we assume here that closure is stack allocated (2nd class!). may not be true ...
             val closSize = mem(clos).asInstanceOf[Int]
