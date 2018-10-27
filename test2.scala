@@ -8,8 +8,8 @@ TODO:
   + proper 1st/2nd type checking
   + type-preserving cps
   + 1st/2nd class for tuple fields
-  - cps transform: cps arg 1st/2nd based on context (see also typing for Shift)
-  - type check transformed terms again
+  + type check terms again after cps
+  - cps transform: cps arg 1st/2nd based on context (see also typing for Shift) -- do test cases first?
 */
 
 object Test {
@@ -68,7 +68,7 @@ object Test {
   def typeCheck1(t: Term, m: Int, ty: EType)(implicit env: Map[String,(Int,Type)]): Term = t match {
     case Const(x: Int) =>       t withType Some(Nat)
     case Const(x: Boolean) =>   t withType Some(Bool)
-    case Var(x,0) =>            val (n1,tpe) = sanitize(env,m)(x); Var(x,n1) withType Some(tpe)
+    case Var(x,n) =>            val (n1,tpe) = sanitize(env,m)(x); assert(n == 0 || n == n1); Var(x,n1) withType Some(tpe)
 
     case Exit(x) =>
       val x1 = typeCheck(x, 1, Some(Nat))
@@ -83,6 +83,17 @@ object Test {
       val a1 = typeCheck(a, 2, Some(Nat))
       val b1 = typeCheck(b, 2, Some(Nat))
       Times(a1, b1) withType Some(Nat)
+
+    case Tuple(as) =>
+      val Some(Product(ats)) = ty //
+      val as1 = (as zip ats) map { case (a, (n, t)) => assert(n == m) /* relax? */; typeCheck(a, m, Some(t)) } 
+      Tuple(as1) withType Some(Product(as1 map (a => (m,a.tpe.get))))
+
+    case Field(a, n) =>
+      val a1 = typeCheck(a, 2, Some(Unknown)) // expected type? we don't know size of tuple ...
+      val Some(Product(as)) = a1.tpe
+      assert(m <= as(n)._1)
+      Field(a1, n) withType Some(as(n)._2)
 
     case Let(x,n,t,y,z) =>
       val y1 = typeCheck(y, n, Some(t))(env + (x -> (n,t)))
@@ -127,16 +138,23 @@ object Test {
   }
 
   def typeCheck(t: Term, m: Int, ty: EType)(implicit env: Map[String,(Int,Type)]): Term = {
-    if (t.tpe ne null) return t
-    var t1 = typeCheck1(t,m,ty)
-    def assert(b: Boolean, s: String) = if (!b) println(s) // continue on error
+    // if (t.tpe ne null) return t
 
-    assert(typeConformsE(t1.tpe, ty), 
-      s"type error!\n" +
-      s"    expression: "+pretty(t) + "\n" +
-      s"    expected:   "+ty.map(pretty).mkString(" / ") + "\n" +
-      s"    actual:     "+t1.tpe.map(pretty).mkString(" / ")
-    )
+    // def assert(b: Boolean, s: String) = if (!b) println(s) // continue on error
+    def tce(t1: EType, t2: EType) = assert(typeConformsE(t1, t2),
+        s"type error!\n" +
+        s"    expression: "+pretty(t) + "\n" +
+        s"    expected:   "+t2.map(pretty).mkString(" / ") + "\n" +
+        s"    actual:     "+t1.map(pretty).mkString(" / ")
+      )
+
+    if (t.tpe ne null) tce(t.tpe, ty) // previous assigned type must match expected
+
+    var t1 = typeCheck1(t,m,ty)
+    tce(t1.tpe, ty) // computed type must match expected
+
+    if (t.tpe ne null) tce(t.tpe, t1.tpe) // previous assigned type must match computed type
+
     t1
   }
 
@@ -156,6 +174,8 @@ object Test {
     case (Bool, Unknown) => true
     case (Fun(t1,n,t2), Unknown) => typeConforms(t1, Unknown) && typeConformsE(t2, t2.map(_ => Unknown))
     case (Fun(t1,n1,t2), Fun(t3,n2,t4)) => typeConforms(t1, t3) && typeConformsE(t2, t4) && n1 != 0 && (n2 == 0 || n1 == n2)
+    case (Product(ts1), Unknown) => ts1 forall { case (n1,t1) => typeConforms(t1, Unknown) && n1 != 0 }
+    case (Product(ts1), Product(ts2)) => ts1.length == ts2.length && (ts1 zip ts2).forall { case ((n1,t1),(n2,t2)) => typeConforms(t1,t2) && n1 != 0 && (n2 == 0 || n1 == n2) }
     case _ => false
   }
 
@@ -694,10 +714,13 @@ object Test {
       val y1 = transVars(y0)(Nil,Nil)
       println(" "+pretty(y1))
 
+      typeCheck(y1,1,Void)(Map()) // type check again!
 
       println("-- closure conversion")
       val y = transClos(y1,1)(Map())
       println(" "+pretty(y))
+
+      //typeCheck(y,1,Void)(Map()) // closure conversion does not type check ...
 
       println("-- std eval")
       val u = evalStd(y)(x => x)(Map())
