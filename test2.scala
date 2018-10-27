@@ -7,9 +7,8 @@ TODO:
   + parsing: how to distinguish 1st/2nd? (default: all 2nd)
   + proper 1st/2nd type checking
   + type-preserving cps
-  - 1st/2nd class for tuple fields
-  - cps transform: cps arg 1st/2nd based on context
-
+  + 1st/2nd class for tuple fields
+  - cps transform: cps arg 1st/2nd based on context (see also typing for Shift)
   - type check transformed terms again
 */
 
