@@ -98,8 +98,8 @@ object Test {
     case Let(x,n,t,y,z) =>
       val y1 = typeCheck(y, n, Some(t))(env + (x -> (n,t)))
       val z1 = typeCheck(z, m, ty)(env + (x -> (n,y1.tpe.get)))
-      // TODO: if t == Unknown use z1.tpe
-      Let(x,n,t,y1,z1) withType z1.tpe
+      val t1 = y1.tpe.get
+      Let(x,n,t1,y1,z1) withType z1.tpe
 
     case If(c,a,b) =>
       val c1 = typeCheck(c, 2, Some(Nat))
@@ -116,11 +116,11 @@ object Test {
 
     case Lam(x, n0, t0, y) => 
       ty match {
-        case Some(Fun(te, ne, ts2)) => // TODO: unknown
+        case Some(Fun(te, ne, ts2)) => // TODO: case unknown
           val n1 = if (n0 == 0) ne else n0
           val t1 = if (t0 == Unknown) te else t0
           assert(n1 != 0)
-          assert(t1 != Unknown,
+          assert(t1 != Unknown, // XXX might be partially unknown?
             s"missing parameter type!\n" +
             s"    expression: "+pretty(t) + "\n" +
             s"    expected:   "+ty.map(pretty).mkString(" / ")
@@ -736,7 +736,7 @@ object Test {
       println("-- cps conversion")
       nNames = 0
       val y0 = transCPS(p1)(Map())
-      val y1 = transVars(y0)(Nil,Nil)
+      val y1 = y0//transVars(y0)(Nil,Nil)
       println(" "+pretty(y1))
 
       typeCheck(y1,1,Void)(Map()) // type check again!
@@ -781,21 +781,27 @@ object Test {
     // some specific test cases:
 
     // 1. conditional in a 2nd class context should lead to (local) continuation with 2nd class argument
-    genMod3(q"val x: Nat => Nat = if (1) ((x:Nat) => 1) else ((x:Nat) => 2); exit(0)", 0)
+    genMod3(q"val x: (Nat => Nat) = if (1) ((x:Nat) => 1) else ((x:Nat) => 2); exit(0)", 0)
 
     // try the same with 2nd-class ref (also: stack-allocated closures of different size)
     // genMod3(q"val a: Nat = 2; val x: Nat => Nat = if (1) ((x:Nat) => 1) else ((x:Nat) => 1+a); exit(0)", 0)
-    // XXX: does not typecheck after cps ('a' not found, since it becomes a 1st-class ctx)
+    // XXX: does not typecheck after cps ('a' not found, since lambda in if branch becomes a 1st-class ctx)
 
     // 2. function call in a second class context -- test if this leads to 1st/2nd class confusion for continuation arg
-    genMod3(q"val f: Nat => Nat = (y:Nat) => 1+y; val x: Nat = f(1); exit(0)", 0)
+    genMod3(q"val f: (Nat => Nat) = (y:Nat) => 1+y; val x = f(1); exit(0)", 0)
+    // this works because translation inserts a 2nd-class let:
+    //  val f: ((Nat^2 * (Nat 1=> )^2) 2=> ) 2= (z0: (Nat^2 * (Nat 1=> )^2) 2=> z0.1(1 + z0.0))
+    //  f(1,(z1: Nat 1=> val x: Nat 2= z1; exit(0)))
+    //       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     // try again with 2nd class closure arg
-    genMod3(q"val f: (Nat=>Nat) => Nat = (y:Nat=>Nat) => y(1); val x: Nat = f(x=>1+x); exit(0)", 0)
+    genMod3(q"val f: ((Nat=>Nat) => Nat) = (y:Nat=>Nat) => y(1); val x = f(x=>1+x); exit(0)", 0)
 
     // 3. shift in second class context
     genMod3(q"val x: Nat = shift(k => k(1)); exit(1+x)", 2)
-
+    // again this works because translation inserts a 2nd-class let:
+    //   (z0: (Nat 1=> ) 2=> z0(1))(z1: Nat 1=> val x: Nat 2= z1; exit(1 + x))
+    //                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     println("DONE")
   }
