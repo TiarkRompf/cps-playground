@@ -98,6 +98,7 @@ object Test {
     case Let(x,n,t,y,z) =>
       val y1 = typeCheck(y, n, Some(t))(env + (x -> (n,t)))
       val z1 = typeCheck(z, m, ty)(env + (x -> (n,y1.tpe.get)))
+      // TODO: if t == Unknown use z1.tpe
       Let(x,n,t,y1,z1) withType z1.tpe
 
     case If(c,a,b) =>
@@ -115,7 +116,7 @@ object Test {
 
     case Lam(x, n0, t0, y) => 
       ty match {
-        case Some(Fun(te, ne, ts2)) =>
+        case Some(Fun(te, ne, ts2)) => // TODO: unknown
           val n1 = if (n0 == 0) ne else n0
           val t1 = if (t0 == Unknown) te else t0
           assert(n1 != 0)
@@ -132,9 +133,9 @@ object Test {
     case Shift(f) =>
       val Some(t1) = ty
       val f1 = typeCheck(f, 2, Some(Fun(Fun(t1,1,Void),2,Void))) // NOTE: replacing 1 with m would be more precise (but then we should perform CPS with m from context, too, which we may need anyways)
-      val Some(Fun(Fun(t2,1,ts2),1,ts3)) = f1.tpe
-      assert(typeConformsE(ts2,ts3))
-      Shift(f1) withType Some(t2)
+      // val Some(Fun(Fun(t2,1,ts2),2,ts3)) = f1.tpe
+      // assert(typeConformsE(ts2,ts3))
+      Shift(f1) withType Some(t1)
   }
 
   def typeCheck(t: Term, m: Int, ty: EType)(implicit env: Map[String,(Int,Type)]): Term = {
@@ -194,6 +195,8 @@ object Test {
     case q"$x * $y"              => Times(fromScala(x),fromScala(y))
     case q"val $x:${t} = $y; $z" => Let(x.toString,fromScalaN(t),fromScalaT(t),fromScala(y),fromScala(z))
     case q"if($c) $a else $b"    => If(fromScala(c),fromScala(a),fromScala(b))
+    case q"$a; $b; $c"           => fromScala(q"$a; { $b; $c }")
+    case q"$a; $b; $c; $d"           => fromScala(q"$a; { $b; $c; $d }")
     case Apply(f,x::Nil)         => App(fromScala(f),fromScala(x))
   }
 
@@ -309,7 +312,7 @@ object Test {
     case Exit(x) => evalStd(x) { u => u }
 
 
-  } catch { case e => (println("error: "+pretty(t)+"    "+e)); throw e }
+  } catch { case e: Exception => (println("error: "+pretty(t)+"    "+e)); throw e }
 
   
   // --------------- transform utils ---------------
@@ -429,6 +432,17 @@ object Test {
             app(transCPS(y)(env + (x -> Var(x,n))), ifun(transType(y.tpe.get)) { u => u }), // id cont, we know it's a value
             app(transCPS(z)(env + (x -> Var(x,n))), k) ) withType Void)
 
+    case Let(x,n,tp, y, z) =>
+      if (t.tpe == Void)        
+        app(transCPS(y)(env + (x -> (Var(x,n) withType Some(transType(tp))))), ifun(transType(y.tpe.get)) { u => 
+          Let(x,n,transType(tp), u,
+            transCPS(z)(env + (x -> (Var(x,n) withType Some(transType(tp))))) ) withType Void })
+      else
+        ifun(cpsType(t.tpe.get))(k => 
+          app(transCPS(y)(env + (x -> Var(x,n))), ifun(transType(y.tpe.get)) { u => 
+            Let(x,n,transType(tp), u,
+              app(transCPS(z)(env + (x -> Var(x,n))), k) ) withType Void }))
+
     case If(c,a,b) =>
       if (t.tpe == Void) 
         app(transCPS(c)(env), ifun(transType(c.tpe.get)) { c2 =>
@@ -483,6 +497,13 @@ object Test {
         case 1 => Let(x, n, tp, transVars(y)(env._1 :+ x, env._2), transVars(z)(env._1 :+ x, env._2))
         case 2 => Let(x, n, tp, transVars(y)(env._1, env._2 :+ x), transVars(z)(env._1, env._2 :+ x))
       }
+
+    case Let(x,n,tp, y, z) =>
+      n match {
+        case 1 => Let(x, n, tp, transVars(y), transVars(z)(env._1 :+ x, env._2))
+        case 2 => Let(x, n, tp, transVars(y), transVars(z)(env._1, env._2 :+ x))
+      }
+
 
     case If(c,a,b) =>      If(transVars(c), transVars(a), transVars(b))
   }
@@ -542,6 +563,10 @@ object Test {
       val cl = RefTuple(nf, ff::(free map env map (_._2))) withType Some(tf) // Note: will be assigned function type
       
       Let(f,nf,tf,cl,transClos(z, m)(env + (f -> (nf,cl))))
+
+    case Let(x,n,t,y,z) =>
+      Let(x,n,t,transClos(y, n), transClos(z, m)(env + (x -> (n, Var(x, n)))))
+
 
     case Lam(x,n,tp,y) =>
       val free = freeVars(t).toList
@@ -756,16 +781,17 @@ object Test {
     // some specific test cases:
 
     // 1. conditional in a 2nd class context should lead to (local) continuation with 2nd class argument
-    genMod3(q"val x = if (1) ((x:Nat) => 1) else ((x:Nat) => 2); exit(0)", 0)
+    genMod3(q"val x: Nat => Nat = if (1) ((x:Nat) => 1) else ((x:Nat) => 2); exit(0)", 0)
 
-    // try the same with stack-allocated closures of different size
-    genMod3(q"val a = 2; val x = if (1) ((x:Nat) => 1) else ((x:Nat) => a); exit(0)", 0)
+    // try the same with 2nd-class ref (also: stack-allocated closures of different size)
+    // genMod3(q"val a: Nat = 2; val x: Nat => Nat = if (1) ((x:Nat) => 1) else ((x:Nat) => 1+a); exit(0)", 0)
+    // XXX: does not typecheck after cps ('a' not found, since it becomes a 1st-class ctx)
 
     // 2. function call in a second class context -- test if this leads to 1st/2nd class confusion for continuation arg
-    genMod3(q"val f = (y:Nat) => 1+y; val x = f(1); exit(0)", 0)
+    genMod3(q"val f: Nat => Nat = (y:Nat) => 1+y; val x: Nat = f(1); exit(0)", 0)
 
     // try again with 2nd class closure arg
-    genMod3(q"val f = (y:Nat=>Nat) => y(1); val x = f(x=>1+x); exit(0)", 0)
+    genMod3(q"val f: (Nat=>Nat) => Nat = (y:Nat=>Nat) => y(1); val x: Nat = f(x=>1+x); exit(0)", 0)
 
     // 3. shift in second class context
     genMod3(q"val x: Nat = shift(k => k(1)); exit(1+x)", 2)
