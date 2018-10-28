@@ -745,11 +745,30 @@ object Test {
 
     genMod3(q"exit(((x:Nat) => 2 * x)(1))", 2)
 
+    // standard recursive functions, all 2nd class on the surface
+
     genMod3(q"val dec: (Nat => Nat) = n => if (n) dec(n-1) else 0; exit(dec(4))", 0)
 
     genMod3(q"val fac: (Nat => Nat) = n => if (n) n * fac(n-1) else 1; exit(fac(4))", 24)
 
     genMod3(q"val fib: (Nat => Nat) = n => if (n-1) fib(n-1)+fib(n-2) else 1; exit(fib(5))", 8)
+
+    // some specific test cases:
+
+    // 1. conditional in a 2nd class context should lead to (local) continuation with 2nd class argument
+    genMod3(q"val x = if (1) ((x:Nat) => 1) else ((x:Nat) => 2); exit(0)", 0)
+
+    // try the same with stack-allocated closures of different size
+    genMod3(q"val a = 2; val x = if (1) ((x:Nat) => 1) else ((x:Nat) => a); exit(0)", 0)
+
+    // 2. function call in a second class context -- test if this leads to 1st/2nd class confusion for continuation arg
+    genMod3(q"val f = (y:Nat) => 1+y; val x = f(1); exit(0)", 0)
+
+    // try again with 2nd class closure arg
+    genMod3(q"val f = (y:Nat=>Nat) => y(1); val x = f(x=>1+x); exit(0)", 0)
+
+    // 3. shift in second class context
+    genMod3(q"val x: Nat = shift(k => k(1)); exit(1+x)", 2)
 
 
     println("DONE")
