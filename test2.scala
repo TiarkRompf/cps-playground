@@ -10,6 +10,7 @@ TODO:
   + 1st/2nd class for tuple fields
   + type check terms again after cps
   - cps transform: cps arg 1st/2nd based on context (see also typing for Shift) -- do test cases first?
+  + alternate medium-low-leve semantics: explicit closure allocation, do not require term-level closure conversion
 */
 
 object Test {
@@ -467,6 +468,98 @@ object Test {
   }
 
 
+  // --------------- medium low-level evaluator (explicit stack allocation, but does not require term-level closure conversion) ---------------
+
+  def evalMLP(t: Term): Any = {
+    var mem = new Array[Any](1000)
+    var sp = 100
+    var hp = 500
+
+    val exit = (x: Any) => return x
+
+    case class Clos(f: Lam, env: Map[String,Any], sp1: Int)
+    case class Addr(x: Int)
+
+    var fuel = 50
+
+    /*@scala.annotation.tailrec*/ def evalLLS(t: Term)(implicit env: Map[String,Any]): Any = t match {
+      case Let(x1,n1,t1,y1,z) => 
+        val y = evalLLE(y1,n1)
+        y match {
+          case Addr(a) => // fix up closure self ref (bit of a hack)
+            val Clos(l,env1,sp1) = mem(a)
+            mem(a) = Clos(l,env1 + (x1 -> Addr(a)), if (a == sp1) a+1 else sp1)
+          case y => 
+        }
+        evalLLS(z)(env + (x1 -> y))
+      case App(f,x) =>
+        // println(s" app ${pretty(t)}    ")
+
+        val Addr(a) = evalLLE(f,2); 
+        val Clos(Lam(x1,n,t1,y),env1,sp1) = mem(a)
+
+        val x2 = evalLLE(x,n); 
+
+        println(s"  app ${pretty(t)}")
+        println(s"      ${mem(a)}    $x2")
+
+        if (n == 1) { // first-class argument: can safely reset stack (especially continuations!)
+          sp = sp1
+          // println(s"    mem(${sp-1}) = ${mem(sp-1)}")
+          // println("")
+        }
+
+        fuel -= 1
+        if (fuel == 0) throw new Exception("out of fuel ...")
+        evalLLS(y)(env1 + (x1 -> x2))
+      case Exit(x) =>
+        println(s"  exit sp=$sp hp=$hp")
+        exit(evalLLE(x,1))
+    }
+
+    def evalLLE(t: Term, m: Int)(implicit env: Map[String,Any]): Any = t match {
+      case Const(x) => x
+      case Var(x,n) => env(x)
+
+      case Times(x,y) =>
+        evalLLE(x,2).asInstanceOf[Int] *
+        evalLLE(y,2).asInstanceOf[Int]
+
+      case Plus(x,y) =>
+        evalLLE(x,2).asInstanceOf[Int] +
+        evalLLE(y,2).asInstanceOf[Int]
+
+      case If(c,a,b) =>
+        val c1 = evalLLE(c,2)
+        if (c1.asInstanceOf[Int] > 0)
+          evalLLE(a,m)
+        else
+          evalLLE(b,m)
+
+      case Tuple(xs) =>
+        // XXX fields need to determine 1st/2nd (should not need to look at type?)
+        val Some(Product(as)) = t.tpe
+        (xs zip as).map { case (x, (n, _)) => evalLLE(x,n) }
+
+      case Field(x,n) =>
+        val xs = evalLLE(x,2).asInstanceOf[List[Any]]
+        xs(n)
+
+      case l@Lam(x,n,t,y) =>
+        val cl = Clos(l,env,sp)
+        val a = m match {
+          case 1 => try hp finally hp += 1
+          case 2 => try sp finally sp += 1
+        }
+        mem(a) = cl
+        Addr(a)
+    }
+
+    evalLLS(t)(Map())
+
+  }
+
+
   // --------------- variable transform (assign numeric indexes -- not strictly needed) ---------------
 
   def transVars(t: Term)(implicit env: (List[String],List[String])): Term = {
@@ -509,7 +602,7 @@ object Test {
   }
 
 
-  // --------------- closure conversion ---------------
+  // --------------- closure conversion (not strictly needed) ---------------
 
   // Note: terms remain typed throughout closure conversion, but types do not change. 
   // So afterwards, function types can refer to both closures and raw functions (should this be changed?)
@@ -606,8 +699,7 @@ object Test {
   }
 
 
-
-  // --------------- low-level evaluator (explicit call stack) ---------------
+  // --------------- low-level evaluator (explicit call stack, requires closure conversion) ---------------
 
   // Note: this was implemented before closure conversion, could go more low-level now
 
@@ -741,21 +833,26 @@ object Test {
 
       typeCheck(y1,1,Void)(Map()) // type check again!
 
-      println("-- closure conversion")
-      val y = transClos(y1,1)(Map())
-      println(" "+pretty(y))
+      // println("-- closure conversion")
+      // val y = transClos(y1,1)(Map())
+      // println(" "+pretty(y))
 
       //typeCheck(y,1,Void)(Map()) // closure conversion does not type check ...
 
       println("-- std eval")
-      val u = evalStd(y)(x => x)(Map())
+      val u = evalStd(y1)(x => x)(Map())
       println(" "+u)
       assert(x == u)
 
-      println("-- low-level eval")
-      val v = evalLLP(y)
+      println("-- medium-low-level eval")
+      val v = evalMLP(y1)
       println(" "+v)
       assert(x == v)
+
+      // println("-- low-level eval")
+      // val v1 = evalLLP(y)
+      // println(" "+v1)
+      // assert(x == v1)
     }
 
 
